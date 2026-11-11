@@ -1,6 +1,7 @@
 import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Login from './pages/Login'
+import Register from './pages/Register'
 import Inventory from './pages/Inventory'
 import Cashbox from './pages/Cashbox'
 import Reports from './pages/Reports'
@@ -10,8 +11,18 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Ruta pública */}
+        {/* Rutas públicas */}
         <Route path="/login" element={<Login />} />
+        
+        {/* Ruta de registro protegida solo para administradores */}
+        <Route 
+          path="/register" 
+          element={
+            <ProtectedRoute allowedRoles={['admin']}>
+              <Register />
+            </ProtectedRoute>
+          } 
+        />
 
         {/* Módulo de Inventario: Administrador y Técnico */}
         <Route 
