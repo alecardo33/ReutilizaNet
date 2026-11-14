@@ -115,7 +115,6 @@ export default function Cashbox() {
       return
     }
 
-    // Descontar stock automáticamente si proviene del inventario
     if (selectedItem) {
       await supabase
         .from('inventory')
@@ -175,7 +174,7 @@ export default function Cashbox() {
                   <option value="">-- Elegir producto --</option>
                   {inventory.map(item => (
                     <option key={item.id} value={item.id}>
-                      {item.name} (Stock: {item.stock} - ${item.price})
+                      {item.name} (Stock: {item.stock} - Bs. {item.price})
                     </option>
                   ))}
                   <option value="manual">+ Otro servicio / venta manual</option>
@@ -209,7 +208,7 @@ export default function Cashbox() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto Total Cobrado</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto Total (Bs.)</label>
                   <input
                     type="number"
                     step="0.01"
@@ -260,7 +259,7 @@ export default function Cashbox() {
             <div className="bg-white p-6 rounded-lg shadow flex justify-between items-center border-l-4 border-green-600">
               <div>
                 <p className="text-sm text-gray-500 font-medium">Total Acumulado en Ventas</p>
-                <h3 className="text-3xl font-bold text-gray-800">${totalCashbox.toFixed(2)}</h3>
+                <h3 className="text-3xl font-bold text-gray-800">Bs. {totalCashbox.toFixed(2)}</h3>
               </div>
               <span className="bg-green-100 text-green-800 text-xs font-semibold px-3 py-1 rounded-full">
                 {sales.length} ventas registradas
@@ -296,7 +295,7 @@ export default function Cashbox() {
                           <td className="p-3 text-gray-500 text-xs">
                             {new Date(sale.created_at).toLocaleString()}
                           </td>
-                          <td className="p-3 font-bold text-green-700">${sale.total_amount}</td>
+                          <td className="p-3 font-bold text-green-700">Bs. {sale.total_amount}</td>
                         </tr>
                       ))}
                     </tbody>

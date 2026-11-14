@@ -161,7 +161,7 @@ export default function Inventory() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición (Bs.)</label>
                   <input
                     type="number"
                     step="0.01"
@@ -173,7 +173,7 @@ export default function Inventory() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta (Bs.)</label>
                   <input
                     type="number"
                     step="0.01"
@@ -233,8 +233,8 @@ export default function Inventory() {
                         <td className="p-3 font-medium">{item.name}</td>
                         <td className="p-3">{item.category}</td>
                         <td className="p-3">{item.condition}</td>
-                        <td className="p-3">${item.cost}</td>
-                        <td className="p-3 font-semibold text-green-700">${item.price}</td>
+                        <td className="p-3">Bs. {item.cost}</td>
+                        <td className="p-3 font-semibold text-green-700">Bs. {item.price}</td>
                         <td className="p-3">
                           <div className="flex items-center justify-center gap-2">
                             <button
