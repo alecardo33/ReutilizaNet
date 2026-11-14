@@ -1,255 +1,268 @@
 import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { Product, ItemStock, Provider } from '../types/inventory'
+
+interface Equipment {
+  id: string
+  name: string
+  category: string
+  condition: string
+  cost: number
+  price: number
+  stock: number
+}
 
 export default function Inventory() {
-  const [products, setProducts] = useState<Product[]>([])
-  const [itemsStock, setItemsStock] = useState<ItemStock[]>([])
-  const [providers, setProviders] = useState<Provider[]>([])
-  
+  const navigate = useNavigate()
+  const [items, setItems] = useState<Equipment[]>([])
   const [loading, setLoading] = useState(true)
-  const [showModal, setShowModal] = useState(false)
+  const [saving, setSaving] = useState(false)
 
-  // Formulario de nuevo equipo base
   const [name, setName] = useState('')
-  const [providerId, setProviderId] = useState('')
-  const [baseCost, setBaseCost] = useState(0)
-  const [salePrice, setSalePrice] = useState(0)
-  const [selectedItems, setSelectedItems] = useState<{ id: string; quantity: number }[]>([])
+  const [category, setCategory] = useState('Laptops')
+  const [condition, setCondition] = useState('Reacondicionado - Grado A')
+  const [cost, setCost] = useState('')
+  const [price, setPrice] = useState('')
+  const [stock, setStock] = useState('1')
 
   useEffect(() => {
-    fetchData()
+    fetchInventory()
   }, [])
 
-  async function fetchData() {
+  const fetchInventory = async () => {
     setLoading(true)
-    try {
-      const [prodRes, itemsRes, provRes] = await Promise.all([
-        supabase.from('products').select('*, providers(*)'),
-        supabase.from('items_stock').select('*'),
-        supabase.from('providers').select('*')
-      ])
+    const { data, error } = await supabase
+      .from('inventory')
+      .select('*')
+      .order('created_at', { ascending: false })
 
-      if (prodRes.data) setProducts(prodRes.data)
-      if (itemsRes.data) setItemsStock(itemsRes.data)
-      if (provRes.data) setProviders(provRes.data)
-    } catch (error) {
-      console.error('Error cargando inventario:', error)
-    } finally {
-      setLoading(false)
+    if (!error && data) {
+      setItems(data)
     }
+    setLoading(false)
   }
 
-  // Cálculo dinámico del costo final (Costo base + Costo de los ítems adicionales seleccionados)
-  const calculatedFinalCost = baseCost + selectedItems.reduce((acc, curr) => {
-    const item = itemsStock.find(i => i.id === curr.id)
-    return acc + (item ? item.cost_price * curr.quantity : 0)
-  }, 0)
-
-  const handleCreateProduct = async (e: React.FormEvent) => {
+  const handleAddEquipment = async (e: React.FormEvent) => {
     e.preventDefault()
-    try {
-      // 1. Insertar producto principal
-      const { data: newProd, error: prodError } = await supabase
-        .from('products')
-        .insert([{
-          name,
-          provider_id: providerId || null,
-          base_cost: baseCost,
-          final_cost: calculatedFinalCost,
-          sale_price: salePrice,
-          stock: 1
-        }])
-        .select()
-        .single()
+    if (!name || !cost || !price) return
+    setSaving(true)
 
-      if (prodError) throw prodError
+    const { data: { user } } = await supabase.auth.getUser()
 
-      // 2. Registrar relaciones de ítems adicionales y descontar stock
-      if (newProd && selectedItems.length > 0) {
-        for (const sel of selectedItems) {
-          await supabase.from('product_items').insert({
-            product_id: newProd.id,
-            item_id: sel.id,
-            quantity: sel.quantity
-          })
-
-          // Descontar del stock del componente
-          const currentItem = itemsStock.find(i => i.id === sel.id)
-          if (currentItem) {
-            await supabase
-              .from('items_stock')
-              .update({ stock: Math.max(0, currentItem.stock - sel.quantity) })
-              .eq('id', sel.id)
-          }
-        }
+    const { error } = await supabase.from('inventory').insert([
+      {
+        name,
+        category,
+        condition,
+        cost: Number(cost),
+        price: Number(price),
+        stock: Number(stock) || 1,
+        created_by: user?.id
       }
+    ])
 
-      setShowModal(false)
+    if (!error) {
       setName('')
-      setBaseCost(0)
-      setSalePrice(0)
-      setSelectedItems([])
-      fetchData()
-    } catch (error: any) {
-      alert(`Error al crear producto: ${error.message}`)
+      setCost('')
+      setPrice('')
+      setStock('1')
+      fetchInventory()
+    } else {
+      alert('Error al guardar equipo: ' + error.message)
+    }
+    setSaving(false)
+  }
+
+  const handleUpdateStock = async (id: string, currentStock: number, delta: number) => {
+    const newStock = Math.max(0, currentStock + delta)
+    const { error } = await supabase
+      .from('inventory')
+      .update({ stock: newStock })
+      .eq('id', id)
+
+    if (!error) {
+      setItems(items.map(item => item.id === id ? { ...item, stock: newStock } : item))
     }
   }
 
-  if (loading) return <div className="p-6">Cargando inventario...</div>
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    navigate('/login')
+  }
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Inventario de Equipos y Componentes</h1>
-        <button 
-          onClick={() => setShowModal(true)}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-        >
-          + Nuevo Equipo Informático
-        </button>
-      </div>
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-800">Módulo de Inventario y Taller</h1>
+            <p className="text-sm text-gray-500">Gestión en tiempo real de equipos informáticos y repuestos</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
+              Ir a Caja
+            </button>
+            <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
+              Reportes
+            </button>
+            <button onClick={() => navigate('/register')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+              Crear Usuario
+            </button>
+            <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
+              Cerrar Sesión
+            </button>
+          </div>
+        </div>
 
-      {/* Tabla de Productos */}
-      <div className="bg-white shadow rounded-lg overflow-hidden mb-8">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Equipo / Producto</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Proveedor</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Costo Base</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Costo Final ( c/ Adiciones )</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Precio Venta</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ganancia Estimada</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {products.map((p) => {
-              const profit = p.sale_price - p.final_cost
-              return (
-                <tr key={p.id}>
-                  <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">{p.name}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-gray-500">{p.providers?.name || 'N/D'}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-gray-700">${p.base_cost.toFixed(2)}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right font-semibold text-blue-600">${p.final_cost.toFixed(2)}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-green-600 font-bold">${p.sale_price.toFixed(2)}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-gray-900">${profit.toFixed(2)}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Modal para Nuevo Producto con Selección Múltiple */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg max-w-lg w-full p-6">
-            <h2 className="text-xl font-bold mb-4">Armar / Registrar Nuevo Equipo</h2>
-            <form onSubmit={handleCreateProduct} className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="bg-white p-6 rounded-lg shadow h-fit">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Equipo o Componente</h2>
+            <form onSubmit={handleAddEquipment} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium">Nombre del Equipo</label>
-                <input 
-                  type="text" 
-                  value={name} 
-                  onChange={e => setName(e.target.value)} 
-                  required 
-                  placeholder="Ej: Laptop Core i5 8th Gen"
-                  className="w-full border p-2 rounded" 
+                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción del Equipo / Pieza</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  required
+                  placeholder="Ej: ThinkPad T480 i5 8GB SSD 256"
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium">Proveedor</label>
-                <select 
-                  value={providerId} 
-                  onChange={e => setProviderId(e.target.value)} 
-                  className="w-full border p-2 rounded"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Categoría</label>
+                <select
+                  value={category}
+                  onChange={e => setCategory(e.target.value)}
+                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
                 >
-                  <option value="">Seleccione proveedor</option>
-                  {providers.map(prov => (
-                    <option key={prov.id} value={prov.id}>{prov.name}</option>
-                  ))}
+                  <option value="Laptops">Laptops</option>
+                  <option value="PCs de Escritorio">PCs de Escritorio</option>
+                  <option value="Monitores">Monitores</option>
+                  <option value="Componentes">Componentes (RAM, SSD, Discos)</option>
+                  <option value="Periféricos">Periféricos y Accesorios</option>
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium">Costo Base ($)</label>
-                  <input 
-                    type="number" 
-                    step="0.01" 
-                    value={baseCost} 
-                    onChange={e => setBaseCost(parseFloat(e.target.value) || 0)} 
-                    className="w-full border p-2 rounded" 
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium">Precio de Venta ($)</label>
-                  <input 
-                    type="number" 
-                    step="0.01" 
-                    value={salePrice} 
-                    onChange={e => setSalePrice(parseFloat(e.target.value) || 0)} 
-                    className="w-full border p-2 rounded" 
-                  />
-                </div>
-              </div>
-
-              {/* Selección múltiple de componentes adicionales */}
               <div>
-                <label className="block text-sm font-medium mb-1">Componentes Adicionales (RAM, SSD, etc.)</label>
-                <div className="border p-3 rounded max-h-40 overflow-y-auto space-y-2">
-                  {itemsStock.map(item => {
-                    const found = selectedItems.find(s => s.id === item.id)
-                    return (
-                      <div key={item.id} className="flex justify-between items-center text-sm">
-                        <span>{item.name} (${item.cost_price.toFixed(2)} c/u - Stock: {item.stock})</span>
-                        <input 
-                          type="number" 
-                          min="0" 
-                          max={item.stock}
-                          value={found?.quantity || 0}
-                          onChange={e => {
-                            const qty = parseInt(e.target.value) || 0
-                            setSelectedItems(prev => {
-                              const filtered = prev.filter(p => p.id !== item.id)
-                              if (qty > 0) return [...filtered, { id: item.id, quantity: qty }]
-                              return filtered
-                            })
-                          }}
-                          className="w-16 border p-1 rounded text-center"
-                        />
-                      </div>
-                    )
-                  })}
+                <label className="block text-sm font-medium text-gray-700 mb-1">Estado / Condición</label>
+                <select
+                  value={condition}
+                  onChange={e => setCondition(e.target.value)}
+                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                >
+                  <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
+                  <option value="Usado - Buen estado">Usado - Buen estado</option>
+                  <option value="En taller / Para reparación">En taller / Para reparación</option>
+                  <option value="Para repuestos">Para repuestos</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cost}
+                    onChange={e => setCost(e.target.value)}
+                    required
+                    placeholder="0.00"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={price}
+                    onChange={e => setPrice(e.target.value)}
+                    required
+                    placeholder="0.00"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
                 </div>
               </div>
 
-              <div className="bg-gray-50 p-3 rounded flex justify-between items-center">
-                <span className="font-medium">Costo Final Calculado:</span>
-                <span className="text-lg font-bold text-blue-600">${calculatedFinalCost.toFixed(2)}</span>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad en Stock</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={stock}
+                  onChange={e => setStock(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
+                />
               </div>
 
-              <div className="flex justify-end space-x-2 pt-2">
-                <button 
-                  type="button" 
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 border rounded text-gray-600 hover:bg-gray-100"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  type="submit" 
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  Guardar Producto
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={saving}
+                className="w-full bg-blue-600 text-white font-semibold py-2 rounded hover:bg-blue-700 transition"
+              >
+                {saving ? 'Guardando...' : 'Agregar al Inventario'}
+              </button>
             </form>
           </div>
+
+          <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">Stock Actual de Equipos y Repuestos</h2>
+            {loading ? (
+              <p className="text-gray-500 text-sm">Cargando inventario desde Supabase...</p>
+            ) : items.length === 0 ? (
+              <p className="text-gray-500 text-sm">No hay equipos registrados aún. Agrega el primero desde el formulario.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                      <th className="p-3">Equipo / Pieza</th>
+                      <th className="p-3">Categoría</th>
+                      <th className="p-3">Estado</th>
+                      <th className="p-3">Costo</th>
+                      <th className="p-3">Venta</th>
+                      <th className="p-3 text-center">Stock</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y text-sm text-gray-700">
+                    {items.map(item => (
+                      <tr key={item.id} className="hover:bg-gray-50">
+                        <td className="p-3 font-medium">{item.name}</td>
+                        <td className="p-3">{item.category}</td>
+                        <td className="p-3">{item.condition}</td>
+                        <td className="p-3">${item.cost}</td>
+                        <td className="p-3 font-semibold text-green-700">${item.price}</td>
+                        <td className="p-3">
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              onClick={() => handleUpdateStock(item.id, item.stock, -1)}
+                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold"
+                            >
+                              -
+                            </button>
+                            <span className={`font-bold ${item.stock === 0 ? 'text-red-600' : ''}`}>
+                              {item.stock}
+                            </span>
+                            <button
+                              onClick={() => handleUpdateStock(item.id, item.stock, 1)}
+                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold"
+                            >
+                              +
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   )
 }

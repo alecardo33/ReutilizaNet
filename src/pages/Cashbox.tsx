@@ -1,281 +1,312 @@
 import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
-interface Transaction {
+interface InventoryItem {
   id: string
-  type: 'purchase' | 'sale' | 'expense'
-  description: string
-  amount: number
-  category: string
-  note?: string
-  receipt_url?: string
+  name: string
+  cost: number
+  price: number
+  stock: number
+}
+
+interface Sale {
+  id: string
+  product_name: string
+  customer: string
+  payment_method: string
+  quantity: number
+  total_amount: number
   created_at: string
 }
 
 export default function Cashbox() {
-  const [transactions, setTransactions] = useState<Transaction[]>([])
+  const navigate = useNavigate()
+  const [inventory, setInventory] = useState<InventoryItem[]>([])
+  const [sales, setSales] = useState<Sale[]>([])
   const [loading, setLoading] = useState(true)
-  const [showModal, setShowModal] = useState(false)
+  const [processing, setProcessing] = useState(false)
 
-  // Campos del formulario
-  const [type, setType] = useState<'purchase' | 'sale' | 'expense'>('expense')
-  const [description, setDescription] = useState('')
-  const [amount, setAmount] = useState(0)
-  const [category, setCategory] = useState('')
-  const [note, setNote] = useState('')
-  const [receiptFile, setReceiptFile] = useState<File | null>(null)
-  const [uploading, setUploading] = useState(false)
+  const [selectedItemId, setSelectedItemId] = useState('')
+  const [manualProduct, setManualProduct] = useState('')
+  const [customer, setCustomer] = useState('')
+  const [paymentMethod, setPaymentMethod] = useState('Efectivo')
+  const [quantity, setQuantity] = useState(1)
+  const [amount, setAmount] = useState('')
 
   useEffect(() => {
-    fetchTransactions()
+    fetchData()
   }, [])
 
-  async function fetchTransactions() {
+  const fetchData = async () => {
     setLoading(true)
-    try {
-      const { data, error } = await supabase
-        .from('transactions')
-        .select('*')
-        .order('created_at', { ascending: false })
+    const [invRes, salesRes] = await Promise.all([
+      supabase.from('inventory').select('id, name, cost, price, stock').gt('stock', 0).order('name'),
+      supabase.from('sales').select('*').order('created_at', { ascending: false })
+    ])
 
-      if (error) throw error
-      if (data) setTransactions(data)
-    } catch (error) {
-      console.error('Error al cargar transacciones:', error)
-    } finally {
-      setLoading(false)
+    if (invRes.data) setInventory(invRes.data)
+    if (salesRes.data) setSales(salesRes.data)
+    setLoading(false)
+  }
+
+  const handleSelectProduct = (itemId: string) => {
+    setSelectedItemId(itemId)
+    if (itemId === 'manual' || itemId === '') {
+      setAmount('')
+      return
+    }
+    const item = inventory.find(i => i.id === itemId)
+    if (item) {
+      setAmount((item.price * quantity).toString())
     }
   }
 
-  const handleCreateTransaction = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setUploading(true)
-
-    try {
-      let receiptUrl = null
-
-      // Si se seleccionó un archivo de comprobante, se sube a Supabase Storage
-      if (receiptFile) {
-        const fileExt = receiptFile.name.split('.').pop()
-        const fileName = `${Date.now()}.${fileExt}`
-        const filePath = `${fileName}`
-
-        const { error: uploadError } = await supabase.storage
-          .from('store-assets')
-          .upload(filePath, receiptFile)
-
-        if (uploadError) throw uploadError
-
-        const { data: publicURLData } = supabase.storage
-          .from('store-assets')
-          .getPublicUrl(filePath)
-
-        receiptUrl = publicURLData.publicUrl
+  const handleQuantityChange = (newQty: number) => {
+    const validQty = Math.max(1, newQty)
+    setQuantity(validQty)
+    if (selectedItemId && selectedItemId !== 'manual') {
+      const item = inventory.find(i => i.id === selectedItemId)
+      if (item) {
+        setAmount((item.price * validQty).toString())
       }
-
-      // Obtener usuario actual
-      const { data: { user } } = await supabase.auth.getUser()
-
-      // Insertar transacción en la base de datos
-      const { error: insertError } = await supabase
-        .from('transactions')
-        .insert([{
-          type,
-          description,
-          amount,
-          category,
-          note,
-          receipt_url: receiptUrl,
-          user_id: user?.id
-        }])
-
-      if (insertError) throw insertError
-
-      // Limpiar y recargar
-      setShowModal(false)
-      setType('expense')
-      setDescription('')
-      setAmount(0)
-      setCategory('')
-      setNote('')
-      setReceiptFile(null)
-      fetchTransactions()
-    } catch (error: any) {
-      alert(`Error al registrar la transacción: ${error.message}`)
-    } finally {
-      setUploading(false)
     }
   }
 
-  if (loading) return <div className="p-6">Cargando módulo de caja...</div>
+  const handleRegisterSale = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!amount) return
+    setProcessing(true)
+
+    const { data: { user } } = await supabase.auth.getUser()
+    const selectedItem = inventory.find(i => i.id === selectedItemId)
+
+    const productName = selectedItem ? selectedItem.name : manualProduct
+    const unitCost = selectedItem ? selectedItem.cost : 0
+
+    if (!productName) {
+      alert('Selecciona un equipo o escribe el concepto de venta.')
+      setProcessing(false)
+      return
+    }
+
+    if (selectedItem && selectedItem.stock < quantity) {
+      alert(`Stock insuficiente. Solo quedan ${selectedItem.stock} unidades.`)
+      setProcessing(false)
+      return
+    }
+
+    const { error: saleError } = await supabase.from('sales').insert([
+      {
+        inventory_id: selectedItem ? selectedItem.id : null,
+        product_name: productName,
+        customer: customer || 'Cliente Mostrador',
+        payment_method: paymentMethod,
+        quantity,
+        unit_cost: unitCost,
+        total_amount: Number(amount),
+        sold_by: user?.id
+      }
+    ])
+
+    if (saleError) {
+      alert('Error al registrar la venta: ' + saleError.message)
+      setProcessing(false)
+      return
+    }
+
+    // Descontar stock automáticamente si proviene del inventario
+    if (selectedItem) {
+      await supabase
+        .from('inventory')
+        .update({ stock: selectedItem.stock - quantity })
+        .eq('id', selectedItem.id)
+    }
+
+    setSelectedItemId('')
+    setManualProduct('')
+    setCustomer('')
+    setQuantity(1)
+    setAmount('')
+    await fetchData()
+    setProcessing(false)
+  }
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    navigate('/login')
+  }
+
+  const totalCashbox = sales.reduce((acc, item) => acc + Number(item.total_amount), 0)
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Módulo de Caja y Transacciones</h1>
-        <button 
-          onClick={() => setShowModal(true)}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-        >
-          + Registrar Movimiento
-        </button>
-      </div>
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-800">Módulo de Caja y Ventas</h1>
+            <p className="text-sm text-gray-500">Registro conectado al inventario y descuento automático de stock</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/inventory')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+              Ir a Inventario
+            </button>
+            <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
+              Reportes
+            </button>
+            <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
+              Cerrar Sesión
+            </button>
+          </div>
+        </div>
 
-      {/* Tabla de Movimientos */}
-      <div className="bg-white shadow rounded-lg overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fecha</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipo</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Descripción / Categoría</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nota / Glosa</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Monto</th>
-              <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Comprobante</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {transactions.map((tx) => {
-              const isIncome = tx.type === 'sale'
-              return (
-                <tr key={tx.id}>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {new Date(tx.created_at).toLocaleDateString()}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      tx.type === 'sale' ? 'bg-green-100 text-green-800' :
-                      tx.type === 'purchase' ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-800'
-                    }`}>
-                      {tx.type === 'sale' ? 'Venta' : tx.type === 'purchase' ? 'Compra' : 'Gasto'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                    {tx.description} <br />
-                    <span className="text-xs text-gray-400 font-normal">{tx.category}</span>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate">
-                    {tx.note || '-'}
-                  </td>
-                  <td className={`px-6 py-4 whitespace-nowrap text-right text-sm font-bold ${
-                    isIncome ? 'text-green-600' : 'text-red-600'
-                  }`}>
-                    {isIncome ? '+' : '-'}${tx.amount.toFixed(2)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-center text-sm">
-                    {tx.receipt_url ? (
-                      <a href={tx.receipt_url} target="_blank" rel="noreferrer" className="text-blue-600 underline hover:text-blue-800">
-                        Ver
-                      </a>
-                    ) : (
-                      <span className="text-gray-400">N/D</span>
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Modal para Nueva Transacción */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4">Registrar Movimiento de Caja</h2>
-            <form onSubmit={handleCreateTransaction} className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="bg-white p-6 rounded-lg shadow h-fit">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Nueva Venta</h2>
+            <form onSubmit={handleRegisterSale} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium">Tipo de Movimiento</label>
-                <select 
-                  value={type} 
-                  onChange={e => setType(e.target.value as any)} 
-                  className="w-full border p-2 rounded"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Seleccionar Equipo de Inventario</label>
+                <select
+                  value={selectedItemId}
+                  onChange={e => handleSelectProduct(e.target.value)}
+                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                  required
                 >
-                  <option value="expense">Gasto Operativo (Alquiler, Sueldos, etc.)</option>
-                  <option value="purchase">Compra de Ítems / Insumos</option>
-                  <option value="sale">Venta de Equipo / Producto</option>
+                  <option value="">-- Elegir producto --</option>
+                  {inventory.map(item => (
+                    <option key={item.id} value={item.id}>
+                      {item.name} (Stock: {item.stock} - ${item.price})
+                    </option>
+                  ))}
+                  <option value="manual">+ Otro servicio / venta manual</option>
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium">Descripción</label>
-                <input 
-                  type="text" 
-                  value={description} 
-                  onChange={e => setDescription(e.target.value)} 
-                  required 
-                  placeholder="Ej: Pago de alquiler del local"
-                  className="w-full border p-2 rounded" 
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
+              {selectedItemId === 'manual' && (
                 <div>
-                  <label className="block text-sm font-medium">Monto ($)</label>
-                  <input 
-                    type="number" 
-                    step="0.01" 
-                    value={amount} 
-                    onChange={e => setAmount(parseFloat(e.target.value) || 0)} 
-                    required 
-                    className="w-full border p-2 rounded" 
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Descripción / Servicio</label>
+                  <input
+                    type="text"
+                    value={manualProduct}
+                    onChange={e => setManualProduct(e.target.value)}
+                    required
+                    placeholder="Ej: Mantenimiento preventivo / Formateo"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={quantity}
+                    onChange={e => handleQuantityChange(Number(e.target.value))}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium">Categoría</label>
-                  <input 
-                    type="text" 
-                    value={category} 
-                    onChange={e => setCategory(e.target.value)} 
-                    placeholder="Ej: Alquiler, Salarios, Insumos"
-                    className="w-full border p-2 rounded" 
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto Total Cobrado</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={amount}
+                    onChange={e => setAmount(e.target.value)}
+                    required
+                    placeholder="0.00"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
               </div>
 
-              {/* Campo Nota / Glosa solicitado */}
               <div>
-                <label className="block text-sm font-medium">Nota / Glosa de Referencia</label>
-                <textarea 
-                  value={note} 
-                  onChange={e => setNote(e.target.value)} 
-                  placeholder="Detalles adicionales, número de factura o referencia..."
-                  className="w-full border p-2 rounded"
-                  rows={2}
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del Cliente (Opcional)</label>
+                <input
+                  type="text"
+                  value={customer}
+                  onChange={e => setCustomer(e.target.value)}
+                  placeholder="Ej: Ana Gómez / Cliente Mostrador"
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
                 />
               </div>
 
-              {/* Subida de Comprobante */}
               <div>
-                <label className="block text-sm font-medium">Adjuntar Comprobante (Imagen o PDF)</label>
-                <input 
-                  type="file" 
-                  accept="image/*,application/pdf"
-                  onChange={e => setReceiptFile(e.target.files?.[0] || null)}
-                  className="w-full border p-1 rounded text-sm text-gray-500"
-                />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Método de Pago</label>
+                <select
+                  value={paymentMethod}
+                  onChange={e => setPaymentMethod(e.target.value)}
+                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                >
+                  <option value="Efectivo">Efectivo</option>
+                  <option value="Transferencia / QR">Transferencia / QR</option>
+                  <option value="Tarjeta">Tarjeta de Débito / Crédito</option>
+                </select>
               </div>
 
-              <div className="flex justify-end space-x-2 pt-4">
-                <button 
-                  type="button" 
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 border rounded text-gray-600 hover:bg-gray-100"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  type="submit" 
-                  disabled={uploading}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  {uploading ? 'Guardando...' : 'Guardar Transacción'}
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={processing}
+                className="w-full bg-green-600 text-white font-semibold py-2 rounded hover:bg-green-700 transition"
+              >
+                {processing ? 'Procesando...' : 'Confirmar Venta'}
+              </button>
             </form>
           </div>
+
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white p-6 rounded-lg shadow flex justify-between items-center border-l-4 border-green-600">
+              <div>
+                <p className="text-sm text-gray-500 font-medium">Total Acumulado en Ventas</p>
+                <h3 className="text-3xl font-bold text-gray-800">${totalCashbox.toFixed(2)}</h3>
+              </div>
+              <span className="bg-green-100 text-green-800 text-xs font-semibold px-3 py-1 rounded-full">
+                {sales.length} ventas registradas
+              </span>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-lg font-bold text-gray-800 mb-4">Historial de Ventas Reales</h2>
+              {loading ? (
+                <p className="text-sm text-gray-500">Cargando ventas...</p>
+              ) : sales.length === 0 ? (
+                <p className="text-sm text-gray-500">Aún no hay ventas registradas en la base de datos.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                        <th className="p-3">Equipo / Concepto</th>
+                        <th className="p-3">Cant.</th>
+                        <th className="p-3">Cliente</th>
+                        <th className="p-3">Pago</th>
+                        <th className="p-3">Fecha</th>
+                        <th className="p-3">Monto</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-sm text-gray-700">
+                      {sales.map(sale => (
+                        <tr key={sale.id} className="hover:bg-gray-50">
+                          <td className="p-3 font-medium">{sale.product_name}</td>
+                          <td className="p-3">{sale.quantity}</td>
+                          <td className="p-3">{sale.customer}</td>
+                          <td className="p-3">{sale.payment_method}</td>
+                          <td className="p-3 text-gray-500 text-xs">
+                            {new Date(sale.created_at).toLocaleString()}
+                          </td>
+                          <td className="p-3 font-bold text-green-700">${sale.total_amount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      )}
+      </div>
     </div>
   )
 }
