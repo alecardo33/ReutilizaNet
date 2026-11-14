@@ -5,6 +5,7 @@ import Register from './pages/Register'
 import Inventory from './pages/Inventory'
 import Cashbox from './pages/Cashbox'
 import Reports from './pages/Reports'
+import Settings from './pages/Settings'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -50,6 +51,16 @@ export default function App() {
           element={
             <ProtectedRoute allowedRoles={['admin']}>
               <Reports />
+            </ProtectedRoute>
+          } 
+        />
+
+        {/* Módulo de Configuración: Solo Administrador */}
+        <Route 
+          path="/settings" 
+          element={
+            <ProtectedRoute allowedRoles={['admin']}>
+              <Settings />
             </ProtectedRoute>
           } 
         />

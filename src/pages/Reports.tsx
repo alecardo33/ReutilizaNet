@@ -16,6 +16,7 @@ export default function Reports() {
   const navigate = useNavigate()
   const [sales, setSales] = useState<SaleRecord[]>([])
   const [inventoryValue, setInventoryValue] = useState(0)
+  const [currency, setCurrency] = useState('Bs.')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -24,14 +25,14 @@ export default function Reports() {
 
   const fetchFinancialData = async () => {
     setLoading(true)
-    const [salesRes, invRes] = await Promise.all([
+    const [salesRes, invRes, settingsRes] = await Promise.all([
       supabase.from('sales').select('*').order('created_at', { ascending: false }),
-      supabase.from('inventory').select('cost, stock')
+      supabase.from('inventory').select('cost, stock'),
+      supabase.from('company_settings').select('currency').eq('id', 1).single()
     ])
 
-    if (salesRes.data) {
-      setSales(salesRes.data)
-    }
+    if (salesRes.data) setSales(salesRes.data)
+    if (settingsRes.data?.currency) setCurrency(settingsRes.data.currency)
 
     if (invRes.data) {
       const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost) * Number(item.stock)), 0)
@@ -67,6 +68,9 @@ export default function Reports() {
             <button onClick={() => navigate('/register')} className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700">
               Gestionar Usuarios
             </button>
+            <button onClick={() => navigate('/settings')} className="bg-gray-700 text-white px-4 py-2 rounded text-sm hover:bg-gray-800">
+              Configuración
+            </button>
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
               Cerrar Sesión
             </button>
@@ -76,19 +80,19 @@ export default function Reports() {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           <div className="bg-white p-5 rounded-lg shadow border-t-4 border-blue-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Ingresos Brutos Totales</p>
-            <p className="text-2xl font-bold text-gray-800 mt-1">Bs. {totalRevenue.toFixed(2)}</p>
+            <p className="text-2xl font-bold text-gray-800 mt-1">{currency} {totalRevenue.toFixed(2)}</p>
           </div>
           <div className="bg-white p-5 rounded-lg shadow border-t-4 border-orange-500">
             <p className="text-xs text-gray-500 uppercase font-semibold">Costo de Equipos Vendidos</p>
-            <p className="text-2xl font-bold text-gray-800 mt-1">Bs. {totalSoldCost.toFixed(2)}</p>
+            <p className="text-2xl font-bold text-gray-800 mt-1">{currency} {totalSoldCost.toFixed(2)}</p>
           </div>
           <div className="bg-white p-5 rounded-lg shadow border-t-4 border-green-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Ganancia Neta Real</p>
-            <p className="text-2xl font-bold text-green-700 mt-1">Bs. {netProfit.toFixed(2)}</p>
+            <p className="text-2xl font-bold text-green-700 mt-1">{currency} {netProfit.toFixed(2)}</p>
           </div>
           <div className="bg-white p-5 rounded-lg shadow border-t-4 border-purple-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Capital en Stock Actual</p>
-            <p className="text-2xl font-bold text-purple-700 mt-1">Bs. {inventoryValue.toFixed(2)}</p>
+            <p className="text-2xl font-bold text-purple-700 mt-1">{currency} {inventoryValue.toFixed(2)}</p>
           </div>
         </div>
 
@@ -120,9 +124,9 @@ export default function Reports() {
                         <td className="p-3 text-xs text-gray-500">{new Date(item.created_at).toLocaleDateString()}</td>
                         <td className="p-3 font-medium">{item.product_name}</td>
                         <td className="p-3">{item.quantity}</td>
-                        <td className="p-3">Bs. {Number(item.total_amount).toFixed(2)}</td>
-                        <td className="p-3 text-red-600">-Bs. {costTotal.toFixed(2)}</td>
-                        <td className="p-3 font-bold text-green-700">+Bs. {profit.toFixed(2)}</td>
+                        <td className="p-3">{currency} {Number(item.total_amount).toFixed(2)}</td>
+                        <td className="p-3 text-red-600">-{currency} {costTotal.toFixed(2)}</td>
+                        <td className="p-3 font-bold text-green-700">+{currency} {profit.toFixed(2)}</td>
                       </tr>
                     )
                   })}
