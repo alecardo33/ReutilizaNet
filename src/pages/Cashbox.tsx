@@ -225,13 +225,16 @@ export default function Cashbox() {
             <p className="text-sm text-gray-500">Registro conectado al inventario, descuento de stock y notas de venta con QR</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+              Inicio
+            </button>
             <button onClick={() => navigate('/inventory')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
               Ir a Inventario
             </button>
             <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
               Reportes
             </button>
-            <button onClick={() => navigate('/settings')} className="bg-gray-700 text-white px-4 py-2 rounded text-sm hover:bg-gray-800">
+            <button onClick={() => navigate('/settings')} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-900">
               Configuración
             </button>
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
@@ -255,7 +258,7 @@ export default function Cashbox() {
                   <option value="">-- Elegir producto --</option>
                   {inventory.map(item => (
                     <option key={item.id} value={item.id}>
-                      {item.name} (Stock: {item.stock} - {cur} {item.price})
+                      {item.name} (Stock: {item.stock} | {cur} {item.price})
                     </option>
                   ))}
                   <option value="manual">+ Otro servicio / venta manual</option>

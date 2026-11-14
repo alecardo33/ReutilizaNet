@@ -59,16 +59,19 @@ export default function Reports() {
             <p className="text-sm text-gray-500">Métricas reales calculadas desde tus ventas e inventario en Supabase</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+              Inicio
+            </button>
             <button onClick={() => navigate('/inventory')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
               Inventario
             </button>
             <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
               Caja
             </button>
-            <button onClick={() => navigate('/register')} className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700">
+            <button onClick={() => navigate('/admin/users')} className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700">
               Gestionar Usuarios
             </button>
-            <button onClick={() => navigate('/settings')} className="bg-gray-700 text-white px-4 py-2 rounded text-sm hover:bg-gray-800">
+            <button onClick={() => navigate('/settings')} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-900">
               Configuración
             </button>
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">

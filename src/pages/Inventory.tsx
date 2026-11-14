@@ -15,6 +15,7 @@ interface Equipment {
 export default function Inventory() {
   const navigate = useNavigate()
   const [items, setItems] = useState<Equipment[]>([])
+  const [currency, setCurrency] = useState('Bs.')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
@@ -31,13 +32,16 @@ export default function Inventory() {
 
   const fetchInventory = async () => {
     setLoading(true)
-    const { data, error } = await supabase
-      .from('inventory')
-      .select('*')
-      .order('created_at', { ascending: false })
+    const [invRes, settingsRes] = await Promise.all([
+      supabase.from('inventory').select('*').order('created_at', { ascending: false }),
+      supabase.from('company_settings').select('currency').eq('id', 1).single()
+    ])
 
-    if (!error && data) {
-      setItems(data)
+    if (!invRes.error && invRes.data) {
+      setItems(invRes.data)
+    }
+    if (settingsRes.data?.currency) {
+      setCurrency(settingsRes.data.currency)
     }
     setLoading(false)
   }
@@ -99,14 +103,20 @@ export default function Inventory() {
             <p className="text-sm text-gray-500">Gestión en tiempo real de equipos informáticos y repuestos</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+              Inicio
+            </button>
             <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
               Ir a Caja
             </button>
             <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
               Reportes
             </button>
-            <button onClick={() => navigate('/register')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
-              Crear Usuario
+            <button onClick={() => navigate('/admin/users')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+              Usuarios
+            </button>
+            <button onClick={() => navigate('/settings')} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-900">
+              Configuración
             </button>
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
               Cerrar Sesión
@@ -161,7 +171,7 @@ export default function Inventory() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición (Bs.)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición ({currency})</label>
                   <input
                     type="number"
                     step="0.01"
@@ -173,7 +183,7 @@ export default function Inventory() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta (Bs.)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta ({currency})</label>
                   <input
                     type="number"
                     step="0.01"
@@ -233,8 +243,8 @@ export default function Inventory() {
                         <td className="p-3 font-medium">{item.name}</td>
                         <td className="p-3">{item.category}</td>
                         <td className="p-3">{item.condition}</td>
-                        <td className="p-3">Bs. {item.cost}</td>
-                        <td className="p-3 font-semibold text-green-700">Bs. {item.price}</td>
+                        <td className="p-3">{currency} {item.cost}</td>
+                        <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
                         <td className="p-3">
                           <div className="flex items-center justify-center gap-2">
                             <button
