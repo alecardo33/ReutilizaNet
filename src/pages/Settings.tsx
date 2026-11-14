@@ -117,6 +117,9 @@ export default function Settings() {
             <p className="text-sm text-gray-500">Datos fiscales, logotipo, moneda y cuenta bancaria para cobros por QR</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button onClick={() => navigate('/')} className="bg-gray-700 text-white px-4 py-2 rounded text-sm hover:bg-gray-800">
+              Inicio
+            </button>
             <button onClick={() => navigate('/inventory')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
               Inventario
             </button>

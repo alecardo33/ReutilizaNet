@@ -8,6 +8,7 @@ import Inventory from '../pages/Inventory'
 import Cashbox from '../pages/Cashbox'
 import Reports from '../pages/Reports'
 import AdminUsers from '../pages/AdminUsers'
+import Settings from '../pages/Settings'
 
 export function AppRoutes() {
   const [session, setSession] = useState<any>(null)
@@ -39,6 +40,7 @@ export function AppRoutes() {
         <Route path="/cashbox" element={session ? <Cashbox /> : <Navigate to="/login" />} />
         <Route path="/reports" element={session ? <Reports /> : <Navigate to="/login" />} />
         <Route path="/admin/users" element={session ? <AdminUsers /> : <Navigate to="/login" />} />
+        <Route path="/settings" element={session ? <Settings /> : <Navigate to="/login" />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </BrowserRouter>
