@@ -10,12 +10,22 @@ interface InventoryItem {
   stock: number
 }
 
+interface CartItem {
+  tempId: string
+  inventory_id: string | null
+  product_name: string
+  quantity: number
+  unit_cost: number
+  unit_price: number
+}
+
 interface Sale {
   id: string
   product_name: string
   customer: string
   payment_method: string
   quantity: number
+  unit_cost: number
   total_amount: number
   created_at: string
 }
@@ -42,14 +52,21 @@ export default function Cashbox() {
   const [loading, setLoading] = useState(true)
   const [processing, setProcessing] = useState(false)
 
+  // Selector de ítem para agregar al carrito
   const [selectedItemId, setSelectedItemId] = useState('')
   const [manualProduct, setManualProduct] = useState('')
+  const [quantity, setQuantity] = useState(1)
+  const [unitPrice, setUnitPrice] = useState('')
+
+  // Carrito múltiple
+  const [cart, setCart] = useState<CartItem[]>([])
+
+  // Datos generales de la venta
   const [customer, setCustomer] = useState('')
   const [paymentMethod, setPaymentMethod] = useState('Efectivo (Contado)')
-  const [quantity, setQuantity] = useState(1)
-  const [amount, setAmount] = useState('')
 
-  const [selectedReceipt, setSelectedReceipt] = useState<Sale | null>(null)
+  // Modal de comprobante / nota de venta (agrupa ventas del mismo lote)
+  const [selectedReceiptGroup, setSelectedReceiptGroup] = useState<Sale[] | null>(null)
   const [warrantyNotes, setWarrantyNotes] = useState('30 días de garantía por defectos de hardware.')
 
   const [settings, setSettings] = useState<CompanySettings>({
@@ -90,68 +107,180 @@ export default function Cashbox() {
     setLoading(false)
   }
 
+  // Calcular stock disponible real restando lo que ya está en el carrito
+  const getAvailableStock = (itemId: string) => {
+    const invItem = inventory.find(i => i.id === itemId)
+    if (!invItem) return 0
+    const inCartQty = cart
+      .filter(c => c.inventory_id === itemId)
+      .reduce((sum, c) => sum + c.quantity, 0)
+    return Math.max(0, invItem.stock - inCartQty)
+  }
+
   const handleSelectProduct = (itemId: string) => {
     setSelectedItemId(itemId)
+    setQuantity(1)
     if (itemId === 'manual' || itemId === '') {
-      setAmount('')
+      setUnitPrice('')
       return
     }
     const item = inventory.find(i => i.id === itemId)
     if (item) {
-      setAmount((item.price * quantity).toString())
+      setUnitPrice(item.price.toString())
     }
   }
 
-  const handleQuantityChange = (newQty: number) => {
-    const validQty = Math.max(1, newQty)
-    setQuantity(validQty)
-    if (selectedItemId && selectedItemId !== 'manual') {
-      const item = inventory.find(i => i.id === selectedItemId)
-      if (item) {
-        setAmount((item.price * validQty).toString())
+  const handleAddToCart = () => {
+    if (!selectedItemId) {
+      alert('Selecciona un equipo o servicio antes de agregar.')
+      return
+    }
+
+    const validQty = Math.max(1, Number(quantity))
+    const validPrice = Number(unitPrice)
+
+    if (isNaN(validPrice) || validPrice < 0) {
+      alert('Ingresa un precio unitario válido.')
+      return
+    }
+
+    if (selectedItemId === 'manual') {
+      if (!manualProduct.trim()) {
+        alert('Escribe la descripción del servicio o venta manual.')
+        return
       }
-    }
-  }
-
-  const handleRegisterSale = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!amount) return
-    setProcessing(true)
-
-    const { data: { user } } = await supabase.auth.getUser()
-    const selectedItem = inventory.find(i => i.id === selectedItemId)
-
-    const productName = selectedItem ? selectedItem.name : manualProduct
-    const unitCost = selectedItem ? selectedItem.cost : 0
-
-    if (!productName) {
-      alert('Selecciona un equipo o escribe el concepto de venta.')
-      setProcessing(false)
-      return
-    }
-
-    if (selectedItem && selectedItem.stock < quantity) {
-      alert(`Stock insuficiente. Solo quedan ${selectedItem.stock} unidades.`)
-      setProcessing(false)
-      return
-    }
-
-    const { data: insertedSale, error: saleError } = await supabase
-      .from('sales')
-      .insert([
+      setCart(prev => [
+        ...prev,
         {
-          inventory_id: selectedItem ? selectedItem.id : null,
-          product_name: productName,
-          customer: customer || 'Cliente Mostrador',
-          payment_method: paymentMethod,
-          quantity,
-          unit_cost: unitCost,
-          total_amount: Number(amount),
-          sold_by: user?.id
+          tempId: crypto.randomUUID(),
+          inventory_id: null,
+          product_name: manualProduct.trim(),
+          quantity: validQty,
+          unit_cost: 0,
+          unit_price: validPrice
         }
       ])
+      setManualProduct('')
+      setSelectedItemId('')
+      setQuantity(1)
+      setUnitPrice('')
+      return
+    }
+
+    const item = inventory.find(i => i.id === selectedItemId)
+    if (!item) return
+
+    const remainingStock = getAvailableStock(item.id)
+    if (validQty > remainingStock) {
+      alert(`Stock insuficiente. Solo quedan ${remainingStock} unidades disponibles de ${item.name}.`)
+      return
+    }
+
+    // Si el mismo producto con el mismo precio ya está en el carrito, sumar cantidad
+    const existingIndex = cart.findIndex(
+      c => c.inventory_id === item.id && c.unit_price === validPrice
+    )
+
+    if (existingIndex >= 0) {
+      const updated = [...cart]
+      updated[existingIndex].quantity += validQty
+      setCart(updated)
+    } else {
+      setCart(prev => [
+        ...prev,
+        {
+          tempId: crypto.randomUUID(),
+          inventory_id: item.id,
+          product_name: item.name,
+          quantity: validQty,
+          unit_cost: Number(item.cost),
+          unit_price: validPrice
+        }
+      ])
+    }
+
+    setSelectedItemId('')
+    setQuantity(1)
+    setUnitPrice('')
+  }
+
+  const handleRemoveFromCart = (tempId: string) => {
+    setCart(prev => prev.filter(item => item.tempId !== tempId))
+  }
+
+  const handleConfirmCartSale = async (e: React.FormEvent) => {
+    e.preventDefault()
+
+    // Permitir venta directa si el usuario llenó un ítem sin darle a "+ Agregar al carrito"
+    let itemsToProcess = [...cart]
+    if (itemsToProcess.length === 0 && selectedItemId) {
+      const validQty = Math.max(1, Number(quantity))
+      const validPrice = Number(unitPrice)
+      if (selectedItemId === 'manual' && manualProduct.trim()) {
+        itemsToProcess.push({
+          tempId: 'direct',
+          inventory_id: null,
+          product_name: manualProduct.trim(),
+          quantity: validQty,
+          unit_cost: 0,
+          unit_price: validPrice || 0
+        })
+      } else {
+        const item = inventory.find(i => i.id === selectedItemId)
+        if (item && validQty <= item.stock) {
+          itemsToProcess.push({
+            tempId: 'direct',
+            inventory_id: item.id,
+            product_name: item.name,
+            quantity: validQty,
+            unit_cost: Number(item.cost),
+            unit_price: validPrice || Number(item.price)
+          })
+        }
+      }
+    }
+
+    if (itemsToProcess.length === 0) {
+      alert('Agrega al menos un equipo o servicio al carrito para registrar la venta.')
+      return
+    }
+
+    setProcessing(true)
+    const { data: { user } } = await supabase.auth.getUser()
+    const finalCustomer = customer.trim() || 'Cliente Mostrador'
+
+    // Agrupar cantidades por inventory_id para validar y descontar stock
+    const stockDeductions: Record<string, number> = {}
+    for (const item of itemsToProcess) {
+      if (item.inventory_id) {
+        stockDeductions[item.inventory_id] = (stockDeductions[item.inventory_id] || 0) + item.quantity
+      }
+    }
+
+    for (const [invId, totalQty] of Object.entries(stockDeductions)) {
+      const invItem = inventory.find(i => i.id === invId)
+      if (!invItem || invItem.stock < totalQty) {
+        alert(`Stock insuficiente para ${invItem?.name || 'uno de los equipos'}.`)
+        setProcessing(false)
+        return
+      }
+    }
+
+    const rowsToInsert = itemsToProcess.map(item => ({
+      inventory_id: item.inventory_id,
+      product_name: item.product_name,
+      customer: finalCustomer,
+      payment_method: paymentMethod,
+      quantity: item.quantity,
+      unit_cost: item.unit_cost,
+      total_amount: Number((item.unit_price * item.quantity).toFixed(2)),
+      sold_by: user?.id
+    }))
+
+    const { data: insertedSales, error: saleError } = await supabase
+      .from('sales')
+      .insert(rowsToInsert)
       .select()
-      .single()
 
     if (saleError) {
       alert('Error al registrar la venta: ' + saleError.message)
@@ -159,24 +288,43 @@ export default function Cashbox() {
       return
     }
 
-    if (selectedItem) {
-      await supabase
-        .from('inventory')
-        .update({ stock: selectedItem.stock - quantity })
-        .eq('id', selectedItem.id)
+    // Descontar stock en inventario
+    for (const [invId, totalQty] of Object.entries(stockDeductions)) {
+      const invItem = inventory.find(i => i.id === invId)
+      if (invItem) {
+        await supabase
+          .from('inventory')
+          .update({ stock: invItem.stock - totalQty })
+          .eq('id', invId)
+      }
     }
 
+    setCart([])
     setSelectedItemId('')
     setManualProduct('')
     setCustomer('')
     setQuantity(1)
-    setAmount('')
+    setUnitPrice('')
     await fetchData()
     setProcessing(false)
 
-    if (insertedSale) {
-      setSelectedReceipt(insertedSale)
+    if (insertedSales && insertedSales.length > 0) {
+      setSelectedReceiptGroup(insertedSales)
     }
+  }
+
+  // Al hacer clic en "Ver / Imprimir" en el historial, agrupar ítems vendidos en la misma operación (mismo cliente y minuto)
+  const handleOpenHistoryReceipt = (targetSale: Sale) => {
+    const targetTime = new Date(targetSale.created_at).getTime()
+    const relatedSales = sales.filter(s => {
+      const sTime = new Date(s.created_at).getTime()
+      return (
+        s.customer === targetSale.customer &&
+        s.payment_method === targetSale.payment_method &&
+        Math.abs(sTime - targetTime) <= 10000
+      )
+    })
+    setSelectedReceiptGroup(relatedSales.length > 0 ? relatedSales.reverse() : [targetSale])
   }
 
   const handleLogout = async () => {
@@ -190,6 +338,10 @@ export default function Cashbox() {
 
   const cur = settings.currency || 'Bs.'
   const totalCashbox = sales.reduce((acc, item) => acc + Number(item.total_amount), 0)
+  const cartTotal = cart.reduce((acc, item) => acc + item.unit_price * item.quantity, 0)
+  const receiptTotal = selectedReceiptGroup
+    ? selectedReceiptGroup.reduce((acc, item) => acc + Number(item.total_amount), 0)
+    : 0
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
@@ -222,7 +374,7 @@ export default function Cashbox() {
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
             <h1 className="text-2xl font-bold text-gray-800">Módulo de Caja y Ventas</h1>
-            <p className="text-sm text-gray-500">Registro conectado al inventario, descuento de stock y notas de venta con QR</p>
+            <p className="text-sm text-gray-500">Carrito múltiple, descuento automático de stock y notas de venta con QR</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -244,69 +396,138 @@ export default function Cashbox() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="bg-white p-6 rounded-lg shadow h-fit">
-            <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Nueva Venta</h2>
-            <form onSubmit={handleRegisterSale} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Seleccionar Equipo de Inventario</label>
-                <select
-                  value={selectedItemId}
-                  onChange={e => handleSelectProduct(e.target.value)}
-                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                  required
+          {/* Panel Izquierdo: Constructor de Venta / Carrito */}
+          <div className="bg-white p-6 rounded-lg shadow h-fit space-y-5">
+            <div>
+              <h2 className="text-lg font-bold text-gray-800 mb-3">1. Agregar Ítems a la Venta</h2>
+              <div className="space-y-3 bg-gray-50 p-3.5 rounded-lg border border-gray-200">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Equipo o Servicio</label>
+                  <select
+                    value={selectedItemId}
+                    onChange={e => handleSelectProduct(e.target.value)}
+                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                  >
+                    <option value="">-- Elegir producto --</option>
+                    {inventory.map(item => {
+                      const avail = getAvailableStock(item.id)
+                      return (
+                        <option key={item.id} value={item.id} disabled={avail === 0}>
+                          {item.name} (Disp: {avail} | {cur} {item.price})
+                        </option>
+                      )
+                    })}
+                    <option value="manual">+ Otro servicio / venta manual</option>
+                  </select>
+                </div>
+
+                {selectedItemId === 'manual' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Descripción / Servicio</label>
+                    <input
+                      type="text"
+                      value={manualProduct}
+                      onChange={e => setManualProduct(e.target.value)}
+                      placeholder="Ej: Mantenimiento / Instalación SSD"
+                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                    />
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={quantity}
+                      onChange={e => setQuantity(Math.max(1, Number(e.target.value)))}
+                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Unit. ({cur})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={unitPrice}
+                      onChange={e => setUnitPrice(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleAddToCart}
+                  className="w-full bg-blue-600 text-white font-semibold py-2 rounded text-sm hover:bg-blue-700 transition"
                 >
-                  <option value="">-- Elegir producto --</option>
-                  {inventory.map(item => (
-                    <option key={item.id} value={item.id}>
-                      {item.name} (Stock: {item.stock} | {cur} {item.price})
-                    </option>
-                  ))}
-                  <option value="manual">+ Otro servicio / venta manual</option>
-                </select>
+                  + Agregar al Carrito
+                </button>
+              </div>
+            </div>
+
+            {/* Lista del Carrito */}
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-sm font-bold text-gray-800 uppercase">Detalle del Carrito ({cart.length})</h3>
+                {cart.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setCart([])}
+                    className="text-xs text-red-600 hover:underline"
+                  >
+                    Vaciar
+                  </button>
+                )}
               </div>
 
-              {selectedItemId === 'manual' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Descripción / Servicio</label>
-                  <input
-                    type="text"
-                    value={manualProduct}
-                    onChange={e => setManualProduct(e.target.value)}
-                    required
-                    placeholder="Ej: Mantenimiento preventivo / Formateo"
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
+              {cart.length === 0 ? (
+                <p className="text-xs text-gray-400 italic border border-dashed border-gray-300 rounded p-3 text-center">
+                  Aún no agregaste productos. Puedes sumar varios equipos o servicios aquí.
+                </p>
+              ) : (
+                <div className="border border-gray-200 rounded-lg divide-y divide-gray-200 max-h-56 overflow-y-auto">
+                  {cart.map(item => (
+                    <div key={item.tempId} className="p-2.5 flex justify-between items-center text-xs bg-white">
+                      <div className="pr-2">
+                        <p className="font-semibold text-gray-800">{item.product_name}</p>
+                        <p className="text-gray-500">
+                          {item.quantity} x {cur} {item.unit_price.toFixed(2)} ={' '}
+                          <span className="font-bold text-gray-800">
+                            {cur} {(item.quantity * item.unit_price).toFixed(2)}
+                          </span>
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveFromCart(item.tempId)}
+                        className="text-red-600 hover:bg-red-50 px-2 py-1 rounded font-bold"
+                        title="Quitar ítem"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad</label>
-                  <input
-                    type="number"
-                    min="1"
-                    value={quantity}
-                    onChange={e => handleQuantityChange(Number(e.target.value))}
-                    required
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
+              {cart.length > 0 && (
+                <div className="mt-2 bg-green-50 border border-green-200 rounded p-2.5 flex justify-between items-center">
+                  <span className="text-xs font-bold text-green-900 uppercase">Total Carrito:</span>
+                  <span className="text-lg font-extrabold text-green-700">
+                    {cur} {cartTotal.toFixed(2)}
+                  </span>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto Total ({cur})</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={amount}
-                    onChange={e => setAmount(e.target.value)}
-                    required
-                    placeholder="0.00"
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
-                </div>
-              </div>
+              )}
+            </div>
 
+            {/* Datos de Cliente y Cierre de Venta */}
+            <form onSubmit={handleConfirmCartSale} className="space-y-3 border-t pt-4">
+              <h2 className="text-sm font-bold text-gray-800 uppercase">2. Datos del Cliente y Pago</h2>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del Cliente (Opcional)</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Nombre del Cliente (Opcional)</label>
                 <input
                   type="text"
                   value={customer}
@@ -317,7 +538,7 @@ export default function Cashbox() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Modalidad / Método de Pago</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Modalidad / Método de Pago</label>
                 <select
                   value={paymentMethod}
                   onChange={e => setPaymentMethod(e.target.value)}
@@ -333,13 +554,18 @@ export default function Cashbox() {
               <button
                 type="submit"
                 disabled={processing}
-                className="w-full bg-green-600 text-white font-semibold py-2 rounded hover:bg-green-700 transition"
+                className="w-full bg-green-600 text-white font-semibold py-2.5 rounded hover:bg-green-700 transition shadow-sm"
               >
-                {processing ? 'Procesando...' : 'Confirmar Venta y Generar Nota'}
+                {processing
+                  ? 'Procesando Venta...'
+                  : cart.length > 0
+                  ? `Confirmar Venta (${cur} ${cartTotal.toFixed(2)})`
+                  : 'Confirmar Venta y Generar Nota'}
               </button>
             </form>
           </div>
 
+          {/* Panel Derecho: Resumen e Historial */}
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white p-6 rounded-lg shadow flex justify-between items-center border-l-4 border-green-600">
               <div>
@@ -347,7 +573,7 @@ export default function Cashbox() {
                 <h3 className="text-3xl font-bold text-gray-800">{cur} {totalCashbox.toFixed(2)}</h3>
               </div>
               <span className="bg-green-100 text-green-800 text-xs font-semibold px-3 py-1 rounded-full">
-                {sales.length} ventas registradas
+                {sales.length} ítems vendidos
               </span>
             </div>
 
@@ -384,7 +610,7 @@ export default function Cashbox() {
                           <td className="p-3 font-bold text-green-700">{cur} {Number(sale.total_amount).toFixed(2)}</td>
                           <td className="p-3 text-center">
                             <button
-                              onClick={() => setSelectedReceipt(sale)}
+                              onClick={() => handleOpenHistoryReceipt(sale)}
                               className="bg-gray-800 text-white px-3 py-1 rounded text-xs hover:bg-gray-900 transition"
                             >
                               Ver / Imprimir
@@ -401,8 +627,8 @@ export default function Cashbox() {
         </div>
       </div>
 
-      {/* Modal de Nota de Venta / Recibo Imprimible */}
-      {selectedReceipt && (
+      {/* Modal de Nota de Venta / Recibo Consolidado Imprimible */}
+      {selectedReceiptGroup && selectedReceiptGroup.length > 0 && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div
             id="printable-receipt"
@@ -438,10 +664,10 @@ export default function Cashbox() {
                   Nota de Venta
                 </span>
                 <p className="text-xs text-gray-600 mt-1 font-mono">
-                  N° {selectedReceipt.id.slice(0, 8).toUpperCase()}
+                  N° {selectedReceiptGroup[0].id.slice(0, 8).toUpperCase()}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {new Date(selectedReceipt.created_at).toLocaleDateString()}
+                  {new Date(selectedReceiptGroup[0].created_at).toLocaleDateString()}
                 </p>
               </div>
             </div>
@@ -450,15 +676,15 @@ export default function Cashbox() {
             <div className="grid grid-cols-2 gap-4 bg-gray-50 p-2.5 rounded text-xs mb-3 border border-gray-200">
               <div>
                 <p className="text-gray-500 uppercase font-semibold">Cliente:</p>
-                <p className="text-gray-900 font-bold text-sm mt-0.5">{selectedReceipt.customer}</p>
+                <p className="text-gray-900 font-bold text-sm mt-0.5">{selectedReceiptGroup[0].customer}</p>
               </div>
               <div className="text-right">
                 <p className="text-gray-500 uppercase font-semibold">Condición / Pago:</p>
-                <p className="text-gray-900 font-bold text-sm mt-0.5">{selectedReceipt.payment_method}</p>
+                <p className="text-gray-900 font-bold text-sm mt-0.5">{selectedReceiptGroup[0].payment_method}</p>
               </div>
             </div>
 
-            {/* Detalle del Equipo */}
+            {/* Tabla Consolidada de Equipos y Servicios */}
             <table className="w-full text-left border-collapse mb-3 text-sm">
               <thead>
                 <tr className="border-b border-gray-300 text-xs uppercase text-gray-600">
@@ -469,25 +695,27 @@ export default function Cashbox() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                <tr>
-                  <td className="py-2 font-semibold">{selectedReceipt.quantity}</td>
-                  <td className="py-2 font-medium text-gray-800">{selectedReceipt.product_name}</td>
-                  <td className="py-2 text-right">
-                    {cur} {(Number(selectedReceipt.total_amount) / Number(selectedReceipt.quantity)).toFixed(2)}
-                  </td>
-                  <td className="py-2 text-right font-bold">
-                    {cur} {Number(selectedReceipt.total_amount).toFixed(2)}
-                  </td>
-                </tr>
+                {selectedReceiptGroup.map(item => (
+                  <tr key={item.id}>
+                    <td className="py-2 font-semibold">{item.quantity}</td>
+                    <td className="py-2 font-medium text-gray-800">{item.product_name}</td>
+                    <td className="py-2 text-right">
+                      {cur} {(Number(item.total_amount) / Number(item.quantity)).toFixed(2)}
+                    </td>
+                    <td className="py-2 text-right font-bold">
+                      {cur} {Number(item.total_amount).toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
 
-            {/* Total */}
+            {/* Total Consolidado */}
             <div className="flex justify-end border-t-2 border-gray-800 pt-2 mb-3">
               <div className="text-right">
                 <span className="text-xs uppercase text-gray-600 font-semibold mr-3">Total a Pagar / Pagado:</span>
                 <span className="text-xl font-extrabold text-gray-900">
-                  {cur} {Number(selectedReceipt.total_amount).toFixed(2)}
+                  {cur} {receiptTotal.toFixed(2)}
                 </span>
               </div>
             </div>
@@ -504,7 +732,7 @@ export default function Cashbox() {
                 ) : (
                   <img
                     src={`https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(
-                      `${settings.company_name} | Nota: ${selectedReceipt.id.slice(0, 8).toUpperCase()} | Monto: ${cur} ${Number(selectedReceipt.total_amount).toFixed(2)} | Cuenta: ${settings.account_number}`
+                      `${settings.company_name} | Nota: ${selectedReceiptGroup[0].id.slice(0, 8).toUpperCase()} | Monto: ${cur} ${receiptTotal.toFixed(2)} | Cuenta: ${settings.account_number}`
                     )}`}
                     alt="QR Referencia"
                     className="w-24 h-24 object-contain"
@@ -522,7 +750,7 @@ export default function Cashbox() {
                   </p>
                 )}
                 <p className="text-blue-800 font-semibold">
-                  Ref. Nota N° {selectedReceipt.id.slice(0, 8).toUpperCase()} — Monto: {cur} {Number(selectedReceipt.total_amount).toFixed(2)}
+                  Ref. Nota N° {selectedReceiptGroup[0].id.slice(0, 8).toUpperCase()} — Monto: {cur} {receiptTotal.toFixed(2)}
                 </p>
               </div>
             </div>
@@ -547,7 +775,7 @@ export default function Cashbox() {
             {/* Botones de Acción */}
             <div className="mt-4 flex justify-end gap-3 no-print border-t pt-3">
               <button
-                onClick={() => setSelectedReceipt(null)}
+                onClick={() => setSelectedReceiptGroup(null)}
                 className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
               >
                 Cerrar
