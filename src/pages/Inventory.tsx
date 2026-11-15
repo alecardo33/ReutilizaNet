@@ -19,12 +19,22 @@ export default function Inventory() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
+  // Formulario nuevo equipo
   const [name, setName] = useState('')
   const [category, setCategory] = useState('Laptops')
   const [condition, setCondition] = useState('Reacondicionado - Grado A')
   const [cost, setCost] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('1')
+
+  // Modal de Upgrade / Mejora de Equipo
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false)
+  const [baseEquipment, setBaseEquipment] = useState<Equipment | null>(null)
+  const [selectedComponentId, setSelectedComponentId] = useState('')
+  const [componentQty, setComponentQty] = useState(1)
+  const [newEquipmentName, setNewEquipmentName] = useState('')
+  const [newSalePrice, setNewSalePrice] = useState('')
+  const [upgrading, setUpgrading] = useState(false)
 
   useEffect(() => {
     fetchInventory()
@@ -89,10 +99,140 @@ export default function Inventory() {
     }
   }
 
+  // Abrir modal de mejora para un equipo específico
+  const openUpgradeModal = (equipment: Equipment) => {
+    setBaseEquipment(equipment)
+    setSelectedComponentId('')
+    setComponentQty(1)
+    setNewEquipmentName(equipment.name)
+    setNewSalePrice(equipment.price.toString())
+    setUpgradeModalOpen(true)
+  }
+
+  // Al elegir componente, sugerir actualización de nombre y precio
+  const handleSelectComponent = (compId: string) => {
+    setSelectedComponentId(compId)
+    if (!baseEquipment) return
+    const comp = items.find(i => i.id === compId)
+    if (comp) {
+      setNewEquipmentName(`${baseEquipment.name} + ${componentQty > 1 ? componentQty + 'x ' : ''}${comp.name}`)
+      const suggestedSale = Number(baseEquipment.price) + (Number(comp.price) * componentQty)
+      setNewSalePrice(suggestedSale.toFixed(2))
+    } else {
+      setNewEquipmentName(baseEquipment.name)
+      setNewSalePrice(baseEquipment.price.toString())
+    }
+  }
+
+  const handleComponentQtyChange = (qty: number) => {
+    const validQty = Math.max(1, qty)
+    setComponentQty(validQty)
+    if (!baseEquipment || !selectedComponentId) return
+    const comp = items.find(i => i.id === selectedComponentId)
+    if (comp) {
+      setNewEquipmentName(`${baseEquipment.name} + ${validQty > 1 ? validQty + 'x ' : ''}${comp.name}`)
+      const suggestedSale = Number(baseEquipment.price) + (Number(comp.price) * validQty)
+      setNewSalePrice(suggestedSale.toFixed(2))
+    }
+  }
+
+  // Ejecutar la mejora (ensamblaje)
+  const handleApplyUpgrade = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!baseEquipment || !selectedComponentId) return
+
+    const component = items.find(i => i.id === selectedComponentId)
+    if (!component) return
+
+    if (baseEquipment.stock < 1) {
+      alert('No hay stock disponible del equipo base para realizar la mejora.')
+      return
+    }
+
+    if (component.stock < componentQty) {
+      alert(`Stock insuficiente del componente. Solo hay ${component.stock} unidades disponibles.`)
+      return
+    }
+
+    setUpgrading(true)
+    const { data: { user } } = await supabase.auth.getUser()
+
+    const addedCost = Number(component.cost) * componentQty
+    const finalCost = Number(baseEquipment.cost) + addedCost
+    const finalPrice = Number(newSalePrice) || Number(baseEquipment.price)
+
+    try {
+      // 1. Descontar las unidades del componente usado
+      const { error: compError } = await supabase
+        .from('inventory')
+        .update({ stock: component.stock - componentQty })
+        .eq('id', component.id)
+
+      if (compError) throw compError
+
+      // 2. Si el equipo base tiene 1 sola unidad, lo actualizamos directamente;
+      //    si tiene más de 1, descontamos 1 unidad del base y creamos el equipo mejorado.
+      if (baseEquipment.stock === 1) {
+        const { error: updateBaseError } = await supabase
+          .from('inventory')
+          .update({
+            name: newEquipmentName.trim() || baseEquipment.name,
+            cost: finalCost,
+            price: finalPrice,
+            condition: 'Reacondicionado - Grado A'
+          })
+          .eq('id', baseEquipment.id)
+
+        if (updateBaseError) throw updateBaseError
+      } else {
+        const { error: decBaseError } = await supabase
+          .from('inventory')
+          .update({ stock: baseEquipment.stock - 1 })
+          .eq('id', baseEquipment.id)
+
+        if (decBaseError) throw decBaseError
+
+        const { error: insertUpgradedError } = await supabase
+          .from('inventory')
+          .insert([
+            {
+              name: newEquipmentName.trim() || baseEquipment.name,
+              category: baseEquipment.category,
+              condition: 'Reacondicionado - Grado A',
+              cost: finalCost,
+              price: finalPrice,
+              stock: 1,
+              created_by: user?.id
+            }
+          ])
+
+        if (insertUpgradedError) throw insertUpgradedError
+      }
+
+      setUpgradeModalOpen(false)
+      setBaseEquipment(null)
+      await fetchInventory()
+    } catch (err: any) {
+      alert('Error al procesar la mejora del equipo: ' + err.message)
+    } finally {
+      setUpgrading(false)
+    }
+  }
+
   const handleLogout = async () => {
     await supabase.auth.signOut()
     navigate('/login')
   }
+
+  // Filtrar componentes disponibles para instalar
+  const availableComponents = items.filter(
+    i => i.stock > 0 && baseEquipment && i.id !== baseEquipment.id
+  )
+
+  const selectedComponent = items.find(i => i.id === selectedComponentId)
+  const calculatedNewCost = baseEquipment && selectedComponent
+    ? Number(baseEquipment.cost) + (Number(selectedComponent.cost) * componentQty)
+    : baseEquipment ? Number(baseEquipment.cost) : 0
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
@@ -100,7 +240,7 @@ export default function Inventory() {
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
             <h1 className="text-2xl font-bold text-gray-800">Módulo de Inventario y Taller</h1>
-            <p className="text-sm text-gray-500">Gestión en tiempo real de equipos informáticos y repuestos</p>
+            <p className="text-sm text-gray-500">Gestión en tiempo real de equipos informáticos, repuestos y mejoras (upgrades)</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -235,6 +375,7 @@ export default function Inventory() {
                       <th className="p-3">Costo</th>
                       <th className="p-3">Venta</th>
                       <th className="p-3 text-center">Stock</th>
+                      <th className="p-3 text-center">Taller</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y text-sm text-gray-700">
@@ -264,6 +405,19 @@ export default function Inventory() {
                             </button>
                           </div>
                         </td>
+                        <td className="p-3 text-center">
+                          {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 ? (
+                            <button
+                              onClick={() => openUpgradeModal(item)}
+                              title="Instalar RAM, SSD o componente del stock"
+                              className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-2.5 py-1 rounded transition"
+                            >
+                              + Mejorar
+                            </button>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -273,6 +427,105 @@ export default function Inventory() {
           </div>
         </div>
       </div>
+
+      {/* Modal de Mejora / Ensamblaje de Equipo */}
+      {upgradeModalOpen && baseEquipment && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Mejorar / Repotenciar Equipo</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Instala un componente de tu inventario en <span className="font-semibold text-gray-800">{baseEquipment.name}</span>. Se descontará del stock y se sumará al costo real.
+            </p>
+
+            <form onSubmit={handleApplyUpgrade} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Componente a Instalar (Stock disponible)</label>
+                <select
+                  value={selectedComponentId}
+                  onChange={e => handleSelectComponent(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                >
+                  <option value="">-- Seleccionar pieza / componente --</option>
+                  {availableComponents.map(comp => (
+                    <option key={comp.id} value={comp.id}>
+                      [{comp.category}] {comp.name} (Stock: {comp.stock} | Costo: {currency} {comp.cost})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedComponent && (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad a instalar</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max={selectedComponent.stock}
+                        value={componentQty}
+                        onChange={e => handleComponentQtyChange(Number(e.target.value))}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded border border-gray-200 flex flex-col justify-center">
+                      <span className="text-[11px] text-gray-500 uppercase font-semibold">Nuevo Costo Total</span>
+                      <span className="text-base font-bold text-gray-900">
+                        {currency} {calculatedNewCost.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Nueva Descripción del Equipo</label>
+                    <input
+                      type="text"
+                      value={newEquipmentName}
+                      onChange={e => setNewEquipmentName(e.target.value)}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Nuevo Precio de Venta ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newSalePrice}
+                      onChange={e => setNewSalePrice(e.target.value)}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUpgradeModalOpen(false)
+                    setBaseEquipment(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={upgrading || !selectedComponentId}
+                  className="px-4 py-2 bg-amber-500 text-white rounded text-sm hover:bg-amber-600 font-semibold disabled:opacity-50"
+                >
+                  {upgrading ? 'Aplicando mejora...' : 'Confirmar Mejora'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
