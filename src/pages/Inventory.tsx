@@ -27,6 +27,23 @@ export default function Inventory() {
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('1')
 
+  // Filtros y búsqueda
+  const [searchTerm, setSearchTerm] = useState('')
+  const [filterCategory, setFilterCategory] = useState('Todas')
+  const [filterCondition, setFilterCondition] = useState('Todos')
+  const [onlyInStock, setOnlyInStock] = useState(false)
+
+  // Modal de Edición de Equipo
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [editingItem, setEditingItem] = useState<Equipment | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editCategory, setEditCategory] = useState('Laptops')
+  const [editCondition, setEditCondition] = useState('Reacondicionado - Grado A')
+  const [editCost, setEditCost] = useState('')
+  const [editPrice, setEditPrice] = useState('')
+  const [editStock, setEditStock] = useState('0')
+  const [updatingItem, setUpdatingItem] = useState(false)
+
   // Modal de Upgrade / Mejora de Equipo
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false)
   const [baseEquipment, setBaseEquipment] = useState<Equipment | null>(null)
@@ -99,6 +116,67 @@ export default function Inventory() {
     }
   }
 
+  // Abrir modal de edición
+  const openEditModal = (item: Equipment) => {
+    setEditingItem(item)
+    setEditName(item.name)
+    setEditCategory(item.category)
+    setEditCondition(item.condition)
+    setEditCost(item.cost.toString())
+    setEditPrice(item.price.toString())
+    setEditStock(item.stock.toString())
+    setEditModalOpen(true)
+  }
+
+  // Guardar cambios de edición
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingItem || !editName.trim()) return
+
+    setUpdatingItem(true)
+    const updatedFields = {
+      name: editName.trim(),
+      category: editCategory,
+      condition: editCondition,
+      cost: Number(editCost) || 0,
+      price: Number(editPrice) || 0,
+      stock: Math.max(0, Number(editStock) || 0)
+    }
+
+    const { error } = await supabase
+      .from('inventory')
+      .update(updatedFields)
+      .eq('id', editingItem.id)
+
+    if (!error) {
+      setItems(items.map(item => item.id === editingItem.id ? { ...item, ...updatedFields } : item))
+      setEditModalOpen(false)
+      setEditingItem(null)
+    } else {
+      alert('Error al actualizar equipo: ' + error.message)
+    }
+    setUpdatingItem(false)
+  }
+
+  // Eliminar equipo del inventario
+  const handleDeleteEquipment = async (item: Equipment) => {
+    const confirmed = window.confirm(
+      `¿Estás seguro de eliminar "${item.name}" del inventario? Esta acción no se puede deshacer.`
+    )
+    if (!confirmed) return
+
+    const { error } = await supabase
+      .from('inventory')
+      .delete()
+      .eq('id', item.id)
+
+    if (!error) {
+      setItems(items.filter(i => i.id !== item.id))
+    } else {
+      alert('No se pudo eliminar (puede estar asociado a una venta registrada): ' + error.message)
+    }
+  }
+
   // Abrir modal de mejora para un equipo específico
   const openUpgradeModal = (equipment: Equipment) => {
     setBaseEquipment(equipment)
@@ -162,7 +240,6 @@ export default function Inventory() {
     const finalPrice = Number(newSalePrice) || Number(baseEquipment.price)
 
     try {
-      // 1. Descontar las unidades del componente usado
       const { error: compError } = await supabase
         .from('inventory')
         .update({ stock: component.stock - componentQty })
@@ -170,8 +247,6 @@ export default function Inventory() {
 
       if (compError) throw compError
 
-      // 2. Si el equipo base tiene 1 sola unidad, lo actualizamos directamente;
-      //    si tiene más de 1, descontamos 1 unidad del base y creamos el equipo mejorado.
       if (baseEquipment.stock === 1) {
         const { error: updateBaseError } = await supabase
           .from('inventory')
@@ -224,7 +299,28 @@ export default function Inventory() {
     navigate('/login')
   }
 
-  // Filtrar componentes disponibles para instalar
+  // Filtrado en tiempo real
+  const filteredItems = items.filter(item => {
+    const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesCategory = filterCategory === 'Todas' || item.category === filterCategory
+    const matchesCondition = filterCondition === 'Todos' || item.condition === filterCondition
+    const matchesStock = !onlyInStock || item.stock > 0
+    return matchesSearch && matchesCategory && matchesCondition && matchesStock
+  })
+
+  const clearFilters = () => {
+    setSearchTerm('')
+    setFilterCategory('Todas')
+    setFilterCondition('Todos')
+    setOnlyInStock(false)
+  }
+
+  const hasActiveFilters =
+    searchTerm.trim() !== '' ||
+    filterCategory !== 'Todas' ||
+    filterCondition !== 'Todos' ||
+    onlyInStock
+
   const availableComponents = items.filter(
     i => i.stock > 0 && baseEquipment && i.id !== baseEquipment.id
   )
@@ -236,7 +332,7 @@ export default function Inventory() {
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-7xl mx-auto">
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
             <h1 className="text-2xl font-bold text-gray-800">Módulo de Inventario y Taller</h1>
@@ -265,6 +361,7 @@ export default function Inventory() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Formulario de Registro */}
           <div className="bg-white p-6 rounded-lg shadow h-fit">
             <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Equipo o Componente</h2>
             <form onSubmit={handleAddEquipment} className="space-y-4">
@@ -358,12 +455,74 @@ export default function Inventory() {
             </form>
           </div>
 
+          {/* Tabla de Stock con Barra de Filtros y Edición */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
-            <h2 className="text-lg font-bold text-gray-800 mb-4">Stock Actual de Equipos y Repuestos</h2>
+            <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+              <h2 className="text-lg font-bold text-gray-800">
+                Stock Actual de Equipos y Repuestos{' '}
+                <span className="text-xs font-normal text-gray-500">
+                  ({filteredItems.length} de {items.length} registros)
+                </span>
+              </h2>
+              {hasActiveFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="text-xs text-blue-600 hover:underline font-medium"
+                >
+                  Limpiar filtros
+                </button>
+              )}
+            </div>
+
+            {/* Barra de Búsqueda y Filtros */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                placeholder="Buscar equipo o pieza..."
+                className="border border-gray-300 p-2 rounded text-xs bg-white"
+              />
+              <select
+                value={filterCategory}
+                onChange={e => setFilterCategory(e.target.value)}
+                className="border border-gray-300 p-2 rounded text-xs bg-white"
+              >
+                <option value="Todas">Todas las categorías</option>
+                <option value="Laptops">Laptops</option>
+                <option value="PCs de Escritorio">PCs de Escritorio</option>
+                <option value="Monitores">Monitores</option>
+                <option value="Componentes">Componentes</option>
+                <option value="Periféricos">Periféricos</option>
+              </select>
+              <select
+                value={filterCondition}
+                onChange={e => setFilterCondition(e.target.value)}
+                className="border border-gray-300 p-2 rounded text-xs bg-white"
+              >
+                <option value="Todos">Todos los estados</option>
+                <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
+                <option value="Usado - Buen estado">Usado - Buen estado</option>
+                <option value="En taller / Para reparación">En taller / Para reparación</option>
+                <option value="Para repuestos">Para repuestos</option>
+              </select>
+              <label className="flex items-center gap-2 text-xs text-gray-700 font-medium px-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={onlyInStock}
+                  onChange={e => setOnlyInStock(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600"
+                />
+                Solo con stock (&gt; 0)
+              </label>
+            </div>
+
             {loading ? (
               <p className="text-gray-500 text-sm">Cargando inventario desde Supabase...</p>
             ) : items.length === 0 ? (
               <p className="text-gray-500 text-sm">No hay equipos registrados aún. Agrega el primero desde el formulario.</p>
+            ) : filteredItems.length === 0 ? (
+              <p className="text-gray-500 text-sm">Ningún equipo coincide con los filtros aplicados.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -375,48 +534,62 @@ export default function Inventory() {
                       <th className="p-3">Costo</th>
                       <th className="p-3">Venta</th>
                       <th className="p-3 text-center">Stock</th>
-                      <th className="p-3 text-center">Taller</th>
+                      <th className="p-3 text-center">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y text-sm text-gray-700">
-                    {items.map(item => (
+                    {filteredItems.map(item => (
                       <tr key={item.id} className="hover:bg-gray-50">
                         <td className="p-3 font-medium">{item.name}</td>
-                        <td className="p-3">{item.category}</td>
-                        <td className="p-3">{item.condition}</td>
+                        <td className="p-3 text-xs">{item.category}</td>
+                        <td className="p-3 text-xs">{item.condition}</td>
                         <td className="p-3">{currency} {item.cost}</td>
                         <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
                         <td className="p-3">
-                          <div className="flex items-center justify-center gap-2">
+                          <div className="flex items-center justify-center gap-1.5">
                             <button
                               onClick={() => handleUpdateStock(item.id, item.stock, -1)}
-                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold"
+                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
                             >
                               -
                             </button>
-                            <span className={`font-bold ${item.stock === 0 ? 'text-red-600' : ''}`}>
+                            <span className={`font-bold min-w-[1.25rem] text-center ${item.stock === 0 ? 'text-red-600' : ''}`}>
                               {item.stock}
                             </span>
                             <button
                               onClick={() => handleUpdateStock(item.id, item.stock, 1)}
-                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold"
+                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
                             >
                               +
                             </button>
                           </div>
                         </td>
-                        <td className="p-3 text-center">
-                          {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 ? (
+                        <td className="p-3">
+                          <div className="flex items-center justify-center gap-1.5">
                             <button
-                              onClick={() => openUpgradeModal(item)}
-                              title="Instalar RAM, SSD o componente del stock"
-                              className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-2.5 py-1 rounded transition"
+                              onClick={() => openEditModal(item)}
+                              title="Editar equipo, precios o estado"
+                              className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
                             >
-                              + Mejorar
+                              Editar
                             </button>
-                          ) : (
-                            <span className="text-xs text-gray-400">—</span>
-                          )}
+                            {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 && (
+                              <button
+                                onClick={() => openUpgradeModal(item)}
+                                title="Instalar RAM, SSD o componente del stock"
+                                className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-2 py-1 rounded transition"
+                              >
+                                + Mejorar
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleDeleteEquipment(item)}
+                              title="Eliminar registro"
+                              className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
+                            >
+                              ✕
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -427,6 +600,117 @@ export default function Inventory() {
           </div>
         </div>
       </div>
+
+      {/* Modal de Edición de Equipo */}
+      {editModalOpen && editingItem && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Editar Equipo / Componente</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Modifica los datos, precios o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
+            </p>
+
+            <form onSubmit={handleSaveEdit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción del Equipo / Pieza</label>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Categoría</label>
+                  <select
+                    value={editCategory}
+                    onChange={e => setEditCategory(e.target.value)}
+                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                  >
+                    <option value="Laptops">Laptops</option>
+                    <option value="PCs de Escritorio">PCs de Escritorio</option>
+                    <option value="Monitores">Monitores</option>
+                    <option value="Componentes">Componentes (RAM, SSD, Discos)</option>
+                    <option value="Periféricos">Periféricos y Accesorios</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Estado / Condición</label>
+                  <select
+                    value={editCondition}
+                    onChange={e => setEditCondition(e.target.value)}
+                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                  >
+                    <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
+                    <option value="Usado - Buen estado">Usado - Buen estado</option>
+                    <option value="En taller / Para reparación">En taller / Para reparación</option>
+                    <option value="Para repuestos">Para repuestos</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editCost}
+                    onChange={e => setEditCost(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editPrice}
+                    onChange={e => setEditPrice(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Stock</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editStock}
+                    onChange={e => setEditStock(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditModalOpen(false)
+                    setEditingItem(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingItem}
+                  className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 font-semibold"
+                >
+                  {updatingItem ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Modal de Mejora / Ensamblaje de Equipo */}
       {upgradeModalOpen && baseEquipment && (
