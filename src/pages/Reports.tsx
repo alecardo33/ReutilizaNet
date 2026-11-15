@@ -15,10 +15,23 @@ interface SaleRecord {
   created_at: string
 }
 
+interface PurchaseRecord {
+  id: string
+  item_name: string
+  category: string
+  supplier: string
+  quantity: number
+  unit_cost: number
+  total_cost: number
+  created_at: string
+}
+
 export default function Reports() {
   const navigate = useNavigate()
   const [sales, setSales] = useState<SaleRecord[]>([])
+  const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [inventoryValue, setInventoryValue] = useState(0)
+  const [initialCapital, setInitialCapital] = useState(0)
   const [currency, setCurrency] = useState('Bs.')
   const [companyName, setCompanyName] = useState('ReutilizaNet')
   const [logoUrl, setLogoUrl] = useState('')
@@ -35,16 +48,21 @@ export default function Reports() {
 
   const fetchFinancialData = async () => {
     setLoading(true)
-    const [salesRes, invRes, settingsRes] = await Promise.all([
+    const [salesRes, invRes, settingsRes, purchasesRes] = await Promise.all([
       supabase.from('sales').select('*').order('created_at', { ascending: false }),
       supabase.from('inventory').select('cost, stock'),
-      supabase.from('company_settings').select('currency, company_name, logo_url').eq('id', 1).single()
+      supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital').eq('id', 1).single(),
+      supabase.from('purchases').select('*').order('created_at', { ascending: false })
     ])
 
     if (salesRes.data) setSales(salesRes.data)
-    if (settingsRes.data?.currency) setCurrency(settingsRes.data.currency)
-    if (settingsRes.data?.company_name) setCompanyName(settingsRes.data.company_name)
-    if (settingsRes.data?.logo_url) setLogoUrl(settingsRes.data.logo_url)
+    if (!purchasesRes.error && purchasesRes.data) setPurchases(purchasesRes.data)
+    if (settingsRes.data) {
+      if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
+      if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
+      if (settingsRes.data.logo_url) setLogoUrl(settingsRes.data.logo_url)
+      setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+    }
 
     if (invRes.data) {
       const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost) * Number(item.stock)), 0)
@@ -53,15 +71,12 @@ export default function Reports() {
     setLoading(false)
   }
 
-  // Helpers sincronizados con Cashbox para interpretar pagos y créditos
   const getSalePaidAmount = (sale: SaleRecord): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
     }
     const match = sale.payment_method?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
-    if (match) {
-      return Number(match[1])
-    }
+    if (match) return Number(match[1])
     if (sale.payment_method?.toLowerCase().includes('crédito') || sale.payment_method?.toLowerCase().includes('credito')) {
       return 0
     }
@@ -79,7 +94,6 @@ export default function Reports() {
     navigate('/login')
   }
 
-  // Filtrar ventas por rango de fechas y estado de cobro
   const filteredSales = sales.filter(sale => {
     const pending = getSalePendingBalance(sale)
     const isPending = pending > 0.009
@@ -98,13 +112,27 @@ export default function Reports() {
     return true
   })
 
-  // Cálculos financieros sobre las ventas filtradas
+  const filteredPurchases = purchases.filter(p => {
+    if (dateFrom) {
+      const pDate = new Date(p.created_at).toISOString().split('T')[0]
+      if (pDate < dateFrom) return false
+    }
+    if (dateTo) {
+      const pDate = new Date(p.created_at).toISOString().split('T')[0]
+      if (pDate > dateTo) return false
+    }
+    return true
+  })
+
   const totalRevenue = filteredSales.reduce((acc, s) => acc + Number(s.total_amount), 0)
   const totalCollected = filteredSales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
   const totalReceivable = filteredSales.reduce((acc, s) => acc + getSalePendingBalance(s), 0)
   const totalSoldCost = filteredSales.reduce((acc, s) => acc + (Number(s.unit_cost) * Number(s.quantity)), 0)
   const netProfit = totalRevenue - totalSoldCost
-  const realizedCashProfit = totalCollected - totalSoldCost
+
+  const totalPurchasesCost = filteredPurchases.reduce((acc, p) => acc + Number(p.total_cost), 0)
+  const remainingInitialCapital = initialCapital - purchases.reduce((acc, p) => acc + Number(p.total_cost), 0)
+  const totalCashOnHand = remainingInitialCapital + sales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
 
   const clearFilters = () => {
     setStatusFilter('all')
@@ -117,7 +145,6 @@ export default function Reports() {
   return (
     <div className="min-h-screen bg-gray-100 p-6">
       <div className="max-w-7xl mx-auto">
-        {/* Barra Superior */}
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div className="flex items-center gap-3">
             {logoUrl && (
@@ -128,7 +155,7 @@ export default function Reports() {
                 Panel Gerencial y Reportes — {companyName}
               </h1>
               <p className="text-sm text-gray-500">
-                Control de ingresos cobrados, cuentas por cobrar, costos y utilidad neta real
+                Control de capital inicial, compras de inventario, ventas cobradas, créditos y utilidad neta
               </p>
             </div>
           </div>
@@ -151,6 +178,37 @@ export default function Reports() {
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
               Cerrar Sesión
             </button>
+          </div>
+        </div>
+
+        {/* Estado del Capital del Negocio */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-gray-800">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial</p>
+            <p className="text-2xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
+            <p className="text-[11px] text-gray-400 mt-1">Fondo base registrado en Configuración</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-red-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Compras de Equipos / Periféricos</p>
+            <p className="text-2xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesCost.toFixed(2)}</p>
+            <p className="text-[11px] text-gray-400 mt-1">Descontado del capital inicial</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-amber-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Saldo Remanente de Capital</p>
+            <p className={`text-2xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
+              {currency} {remainingInitialCapital.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-1">Capital inicial disponible sin contar ventas</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-emerald-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Liquidez Total (Capital + Cobros)</p>
+            <p className={`text-2xl font-bold mt-1 ${totalCashOnHand >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+              {currency} {totalCashOnHand.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-1">Efectivo real disponible en el negocio</p>
           </div>
         </div>
 
@@ -197,61 +255,45 @@ export default function Reports() {
             )}
           </div>
           <div className="text-xs text-gray-500">
-            Mostrando <span className="font-bold text-gray-800">{filteredSales.length}</span> de {sales.length} operaciones
+            Mostrando <span className="font-bold text-gray-800">{filteredSales.length}</span> ventas y <span className="font-bold text-gray-800">{filteredPurchases.length}</span> compras
           </div>
         </div>
 
-        {/* Tarjetas de Métricas Financieras (6 KPIs) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-emerald-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Efectivo Real Cobrado</p>
-            <p className="text-2xl font-bold text-emerald-700 mt-1">{currency} {totalCollected.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Dinero efectivamente ingresado (contado + abonos)</p>
+        {/* Tarjetas de Ventas y Rentabilidad */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-emerald-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Ventas Cobradas</p>
+            <p className="text-xl font-bold text-emerald-700 mt-1">{currency} {totalCollected.toFixed(2)}</p>
           </div>
 
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-amber-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Cobrar (Créditos)</p>
-            <p className="text-2xl font-bold text-amber-600 mt-1">{currency} {totalReceivable.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Saldo pendiente por recuperar de clientes</p>
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-amber-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Por Cobrar (Créditos)</p>
+            <p className="text-xl font-bold text-amber-600 mt-1">{currency} {totalReceivable.toFixed(2)}</p>
           </div>
 
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-blue-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Facturación Bruta Total</p>
-            <p className="text-2xl font-bold text-gray-800 mt-1">{currency} {totalRevenue.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Suma total vendida (cobrado + por cobrar)</p>
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-blue-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Facturación Total</p>
+            <p className="text-xl font-bold text-gray-800 mt-1">{currency} {totalRevenue.toFixed(2)}</p>
           </div>
 
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-orange-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Costo de Equipos Vendidos</p>
-            <p className="text-2xl font-bold text-gray-800 mt-1">{currency} {totalSoldCost.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Inversión base de mercadería despachada</p>
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-green-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Utilidad Neta Ventas</p>
+            <p className="text-xl font-bold text-green-700 mt-1">{currency} {netProfit.toFixed(2)}</p>
           </div>
 
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-green-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Ganancia Neta Proyectada</p>
-            <p className="text-2xl font-bold text-green-700 mt-1">{currency} {netProfit.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-500 mt-1">
-              Ganancia ya en caja:{' '}
-              <span className={`font-bold ${realizedCashProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                {currency} {realizedCashProfit.toFixed(2)}
-              </span>
-            </p>
-          </div>
-
-          <div className="bg-white p-5 rounded-lg shadow border-t-4 border-purple-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Capital en Stock Actual</p>
-            <p className="text-2xl font-bold text-purple-700 mt-1">{currency} {inventoryValue.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Valor al costo del inventario disponible</p>
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-purple-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Valor Stock Actual</p>
+            <p className="text-xl font-bold text-purple-700 mt-1">{currency} {inventoryValue.toFixed(2)}</p>
           </div>
         </div>
 
-        {/* Tabla Detallada de Rentabilidad y Estado de Cobro */}
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h2 className="text-lg font-bold text-gray-800 mb-4">Rentabilidad y Estado de Cobro por Operación</h2>
+        {/* Tabla Detallada de Rentabilidad */}
+        <div className="bg-white p-6 rounded-lg shadow mb-6">
+          <h2 className="text-lg font-bold text-gray-800 mb-4">Rentabilidad y Estado de Cobro por Venta</h2>
           {loading ? (
             <p className="text-sm text-gray-500">Calculando reportes financieros...</p>
           ) : filteredSales.length === 0 ? (
-            <p className="text-sm text-gray-500">No hay operaciones que coincidan con los filtros seleccionados.</p>
+            <p className="text-sm text-gray-500">No hay ventas que coincidan con los filtros seleccionados.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">

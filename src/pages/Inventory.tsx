@@ -10,24 +10,46 @@ interface Equipment {
   cost: number
   price: number
   stock: number
+  created_at?: string
+}
+
+interface PurchaseRecord {
+  id: string
+  item_name: string
+  category: string
+  supplier: string
+  quantity: number
+  unit_cost: number
+  total_cost: number
+  created_at: string
 }
 
 export default function Inventory() {
   const navigate = useNavigate()
   const [items, setItems] = useState<Equipment[]>([])
+  const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [currency, setCurrency] = useState('Bs.')
+  const [initialCapital, setInitialCapital] = useState(0)
+  const [totalSalesCollected, setTotalSalesCollected] = useState(0)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  // Formulario nuevo equipo
+  // Pestaña activa en la vista derecha: 'stock' o 'purchases'
+  const [activeTab, setActiveTab] = useState<'stock' | 'purchases'>('stock')
+
+  // Formulario de Compra / Ingreso de Equipo o Periférico
+  const [purchaseMode, setPurchaseMode] = useState<'new' | 'existing'>('new')
+  const [existingItemId, setExistingItemId] = useState('')
   const [name, setName] = useState('')
   const [category, setCategory] = useState('Laptops')
   const [condition, setCondition] = useState('Reacondicionado - Grado A')
+  const [supplier, setSupplier] = useState('')
   const [cost, setCost] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('1')
+  const [deductFromCapital, setDeductFromCapital] = useState(true)
 
-  // Filtros y búsqueda
+  // Filtros y búsqueda de inventario
   const [searchTerm, setSearchTerm] = useState('')
   const [filterCategory, setFilterCategory] = useState('Todas')
   const [filterCondition, setFilterCondition] = useState('Todos')
@@ -54,54 +76,151 @@ export default function Inventory() {
   const [upgrading, setUpgrading] = useState(false)
 
   useEffect(() => {
-    fetchInventory()
+    fetchInventoryAndCapital()
   }, [])
 
-  const fetchInventory = async () => {
+  const getSalePaidAmount = (sale: any): number => {
+    if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
+      return Number(sale.amount_paid)
+    }
+    const match = sale.payment_method?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    if (match) return Number(match[1])
+    if (sale.payment_method?.toLowerCase().includes('crédito') || sale.payment_method?.toLowerCase().includes('credito')) {
+      return 0
+    }
+    return Number(sale.total_amount) || 0
+  }
+
+  const fetchInventoryAndCapital = async () => {
     setLoading(true)
-    const [invRes, settingsRes] = await Promise.all([
+    const [invRes, settingsRes, purchasesRes, salesRes] = await Promise.all([
       supabase.from('inventory').select('*').order('created_at', { ascending: false }),
-      supabase.from('company_settings').select('currency').eq('id', 1).single()
+      supabase.from('company_settings').select('currency, initial_capital').eq('id', 1).single(),
+      supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+      supabase.from('sales').select('total_amount, amount_paid, payment_method')
     ])
 
     if (!invRes.error && invRes.data) {
       setItems(invRes.data)
     }
-    if (settingsRes.data?.currency) {
-      setCurrency(settingsRes.data.currency)
+    if (settingsRes.data) {
+      if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
+      setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+    }
+    if (!purchasesRes.error && purchasesRes.data) {
+      setPurchases(purchasesRes.data)
+    }
+    if (!salesRes.error && salesRes.data) {
+      const collected = salesRes.data.reduce((sum, s) => sum + getSalePaidAmount(s), 0)
+      setTotalSalesCollected(collected)
     }
     setLoading(false)
   }
 
-  const handleAddEquipment = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!name || !cost || !price) return
-    setSaving(true)
+  const handleSelectExistingForRestock = (itemId: string) => {
+    setExistingItemId(itemId)
+    const found = items.find(i => i.id === itemId)
+    if (found) {
+      setName(found.name)
+      setCategory(found.category)
+      setCondition(found.condition)
+      setCost(found.cost.toString())
+      setPrice(found.price.toString())
+    }
+  }
 
+  const handleRegisterPurchase = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const qtyNum = Math.max(1, Number(stock) || 1)
+    const unitCostNum = Number(cost) || 0
+    const unitPriceNum = Number(price) || 0
+    const totalPurchaseCost = Number((unitCostNum * qtyNum).toFixed(2))
+
+    if (purchaseMode === 'new' && !name.trim()) return
+    if (purchaseMode === 'existing' && !existingItemId) {
+      alert('Selecciona un equipo o periférico existente para reabastecer.')
+      return
+    }
+
+    setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
 
-    const { error } = await supabase.from('inventory').insert([
-      {
-        name,
-        category,
-        condition,
-        cost: Number(cost),
-        price: Number(price),
-        stock: Number(stock) || 1,
-        created_by: user?.id
-      }
-    ])
+    try {
+      let recordedItemName = name.trim()
+      let recordedCategory = category
 
-    if (!error) {
+      if (purchaseMode === 'new') {
+        const { error: invErr } = await supabase.from('inventory').insert([
+          {
+            name: recordedItemName,
+            category: recordedCategory,
+            condition,
+            cost: unitCostNum,
+            price: unitPriceNum,
+            stock: qtyNum,
+            created_by: user?.id
+          }
+        ])
+        if (invErr) throw invErr
+      } else {
+        const existingItem = items.find(i => i.id === existingItemId)
+        if (!existingItem) throw new Error('Producto no encontrado.')
+        recordedItemName = existingItem.name
+        recordedCategory = existingItem.category
+
+        // Calcular costo promedio ponderado si cambia el costo de compra
+        const prevTotalVal = existingItem.stock * Number(existingItem.cost)
+        const newTotalStock = existingItem.stock + qtyNum
+        const weightedCost = newTotalStock > 0
+          ? Number(((prevTotalVal + totalPurchaseCost) / newTotalStock).toFixed(2))
+          : unitCostNum
+
+        const { error: updErr } = await supabase
+          .from('inventory')
+          .update({
+            stock: newTotalStock,
+            cost: weightedCost,
+            price: unitPriceNum > 0 ? unitPriceNum : existingItem.price
+          })
+          .eq('id', existingItem.id)
+
+        if (updErr) throw updErr
+      }
+
+      // Registrar movimiento de compra para descontar del Capital Inicial
+      if (deductFromCapital && totalPurchaseCost > 0) {
+        const { error: purErr } = await supabase.from('purchases').insert([
+          {
+            item_name: recordedItemName,
+            category: recordedCategory,
+            supplier: supplier.trim() || 'Proveedor General',
+            quantity: qtyNum,
+            unit_cost: unitCostNum,
+            total_cost: totalPurchaseCost,
+            created_by: user?.id
+          }
+        ])
+
+        if (purErr) {
+          alert(
+            'El equipo se agregó al inventario, pero falta crear la tabla "purchases" en Supabase para registrar el descuento del capital: ' +
+              purErr.message
+          )
+        }
+      }
+
       setName('')
+      setExistingItemId('')
+      setSupplier('')
       setCost('')
       setPrice('')
       setStock('1')
-      fetchInventory()
-    } else {
-      alert('Error al guardar equipo: ' + error.message)
+      await fetchInventoryAndCapital()
+    } catch (err: any) {
+      alert('Error al registrar compra: ' + err.message)
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
   }
 
   const handleUpdateStock = async (id: string, currentStock: number, delta: number) => {
@@ -116,7 +235,6 @@ export default function Inventory() {
     }
   }
 
-  // Abrir modal de edición
   const openEditModal = (item: Equipment) => {
     setEditingItem(item)
     setEditName(item.name)
@@ -128,7 +246,6 @@ export default function Inventory() {
     setEditModalOpen(true)
   }
 
-  // Guardar cambios de edición
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!editingItem || !editName.trim()) return
@@ -158,7 +275,6 @@ export default function Inventory() {
     setUpdatingItem(false)
   }
 
-  // Eliminar equipo del inventario
   const handleDeleteEquipment = async (item: Equipment) => {
     const confirmed = window.confirm(
       `¿Estás seguro de eliminar "${item.name}" del inventario? Esta acción no se puede deshacer.`
@@ -177,7 +293,6 @@ export default function Inventory() {
     }
   }
 
-  // Abrir modal de mejora para un equipo específico
   const openUpgradeModal = (equipment: Equipment) => {
     setBaseEquipment(equipment)
     setSelectedComponentId('')
@@ -187,7 +302,6 @@ export default function Inventory() {
     setUpgradeModalOpen(true)
   }
 
-  // Al elegir componente, sugerir actualización de nombre y precio
   const handleSelectComponent = (compId: string) => {
     setSelectedComponentId(compId)
     if (!baseEquipment) return
@@ -214,7 +328,6 @@ export default function Inventory() {
     }
   }
 
-  // Ejecutar la mejora (ensamblaje)
   const handleApplyUpgrade = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!baseEquipment || !selectedComponentId) return
@@ -286,7 +399,7 @@ export default function Inventory() {
 
       setUpgradeModalOpen(false)
       setBaseEquipment(null)
-      await fetchInventory()
+      await fetchInventoryAndCapital()
     } catch (err: any) {
       alert('Error al procesar la mejora del equipo: ' + err.message)
     } finally {
@@ -298,6 +411,12 @@ export default function Inventory() {
     await supabase.auth.signOut()
     navigate('/login')
   }
+
+  // Cálculos de Capital y Compras
+  const totalPurchasesSpent = purchases.reduce((sum, p) => sum + Number(p.total_cost), 0)
+  const remainingInitialCapital = initialCapital - totalPurchasesSpent
+  const availableLiquidFund = initialCapital - totalPurchasesSpent + totalSalesCollected
+  const formTotalPurchase = (Number(cost) || 0) * (Math.max(1, Number(stock) || 1))
 
   // Filtrado en tiempo real
   const filteredItems = items.filter(item => {
@@ -335,8 +454,8 @@ export default function Inventory() {
       <div className="max-w-7xl mx-auto">
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Módulo de Inventario y Taller</h1>
-            <p className="text-sm text-gray-500">Gestión en tiempo real de equipos informáticos, repuestos y mejoras (upgrades)</p>
+            <h1 className="text-2xl font-bold text-gray-800">Módulo de Compras, Inventario y Taller</h1>
+            <p className="text-sm text-gray-500">Adquisición de equipos/periféricos con descuento de capital inicial y control de stock</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -360,55 +479,165 @@ export default function Inventory() {
           </div>
         </div>
 
+        {/* Barra de Control de Capital Inicial vs Compras */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-gray-800">
+            <div className="flex justify-between items-start">
+              <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial Configurado</p>
+              <button onClick={() => navigate('/settings')} className="text-[11px] text-blue-600 hover:underline">Editar</button>
+            </div>
+            <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Total Invertido en Compras</p>
+            <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesSpent.toFixed(2)}</p>
+            <p className="text-[11px] text-gray-400 mt-0.5">{purchases.length} compra(s) registrada(s)</p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-amber-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Saldo de Capital Inicial</p>
+            <p className={`text-xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
+              {currency} {remainingInitialCapital.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-0.5">Capital inicial menos compras</p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-emerald-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Fondo Total Disponible (Con Ventas)</p>
+            <p className={`text-xl font-bold mt-1 ${availableLiquidFund >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+              {currency} {availableLiquidFund.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-0.5">Saldo capital + ventas cobradas</p>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Formulario de Registro */}
+          {/* Formulario de Compra / Registro */}
           <div className="bg-white p-6 rounded-lg shadow h-fit">
-            <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Equipo o Componente</h2>
-            <form onSubmit={handleAddEquipment} className="space-y-4">
+            <h2 className="text-lg font-bold text-gray-800 mb-3">Registrar Compra / Ingreso</h2>
+
+            <div className="grid grid-cols-2 gap-1.5 bg-gray-100 p-1 rounded-lg mb-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setPurchaseMode('new')
+                  setExistingItemId('')
+                  setName('')
+                  setCost('')
+                  setPrice('')
+                }}
+                className={`py-1.5 rounded text-xs font-semibold transition ${
+                  purchaseMode === 'new' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
+                }`}
+              >
+                + Equipo / Pieza Nueva
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPurchaseMode('existing')
+                  setName('')
+                  setCost('')
+                  setPrice('')
+                }}
+                className={`py-1.5 rounded text-xs font-semibold transition ${
+                  purchaseMode === 'existing' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
+                }`}
+              >
+                Reabastecer Existente
+              </button>
+            </div>
+
+            <form onSubmit={handleRegisterPurchase} className="space-y-3.5">
+              {purchaseMode === 'existing' ? (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Seleccionar Ítem del Catálogo</label>
+                  <select
+                    value={existingItemId}
+                    onChange={e => handleSelectExistingForRestock(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                  >
+                    <option value="">-- Elegir equipo o periférico --</option>
+                    {items.map(it => (
+                      <option key={it.id} value={it.id}>
+                        {it.name} (Stock actual: {it.stock})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Descripción del Equipo / Periférico</label>
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={e => setName(e.target.value)}
+                      required
+                      placeholder="Ej: ThinkPad T480 i5 / Mouse Logitech / SSD 512"
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Categoría</label>
+                      <select
+                        value={category}
+                        onChange={e => setCategory(e.target.value)}
+                        className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
+                      >
+                        <option value="Laptops">Laptops</option>
+                        <option value="PCs de Escritorio">PCs de Escritorio</option>
+                        <option value="Monitores">Monitores</option>
+                        <option value="Componentes">Componentes (RAM, SSD)</option>
+                        <option value="Periféricos">Periféricos y Accesorios</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Estado</label>
+                      <select
+                        value={condition}
+                        onChange={e => setCondition(e.target.value)}
+                        className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
+                      >
+                        <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
+                        <option value="Usado - Buen estado">Usado - Buen estado</option>
+                        <option value="En taller / Para reparación">En taller / Para reparación</option>
+                        <option value="Para repuestos">Para repuestos</option>
+                      </select>
+                    </div>
+                  </div>
+                </>
+              )}
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción del Equipo / Pieza</label>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Proveedor / Origen de Compra (Opcional)</label>
                 <input
                   type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  required
-                  placeholder="Ej: ThinkPad T480 i5 8GB SSD 256"
+                  value={supplier}
+                  onChange={e => setSupplier(e.target.value)}
+                  placeholder="Ej: Importadora Tech / Compra Particular"
                   className="w-full border border-gray-300 p-2 rounded text-sm"
                 />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Categoría</label>
-                <select
-                  value={category}
-                  onChange={e => setCategory(e.target.value)}
-                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                >
-                  <option value="Laptops">Laptops</option>
-                  <option value="PCs de Escritorio">PCs de Escritorio</option>
-                  <option value="Monitores">Monitores</option>
-                  <option value="Componentes">Componentes (RAM, SSD, Discos)</option>
-                  <option value="Periféricos">Periféricos y Accesorios</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Estado / Condición</label>
-                <select
-                  value={condition}
-                  onChange={e => setCondition(e.target.value)}
-                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                >
-                  <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
-                  <option value="Usado - Buen estado">Usado - Buen estado</option>
-                  <option value="En taller / Para reparación">En taller / Para reparación</option>
-                  <option value="Para repuestos">Para repuestos</option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-2">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Adquisición ({currency})</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={stock}
+                    onChange={e => setStock(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
                   <input
                     type="number"
                     step="0.01"
@@ -420,7 +649,7 @@ export default function Inventory() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Precio Venta ({currency})</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
                   <input
                     type="number"
                     step="0.01"
@@ -433,38 +662,67 @@ export default function Inventory() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad en Stock</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={stock}
-                  onChange={e => setStock(e.target.value)}
-                  required
-                  className="w-full border border-gray-300 p-2 rounded text-sm"
-                />
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-semibold text-amber-900 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={deductFromCapital}
+                    onChange={e => setDeductFromCapital(e.target.checked)}
+                    className="rounded border-amber-400 text-amber-600"
+                  />
+                  Descontar compra del Capital Inicial
+                </label>
+                {deductFromCapital && (
+                  <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
+                    <span className="text-amber-800">Total a descontar:</span>
+                    <span className="font-bold text-red-700">
+                      - {currency} {formTotalPurchase.toFixed(2)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <button
                 type="submit"
                 disabled={saving}
-                className="w-full bg-blue-600 text-white font-semibold py-2 rounded hover:bg-blue-700 transition"
+                className="w-full bg-blue-600 text-white font-semibold py-2.5 rounded hover:bg-blue-700 transition"
               >
-                {saving ? 'Guardando...' : 'Agregar al Inventario'}
+                {saving
+                  ? 'Registrando...'
+                  : deductFromCapital
+                  ? `Registrar Compra (- ${currency} ${formTotalPurchase.toFixed(2)})`
+                  : 'Agregar al Inventario'}
               </button>
             </form>
           </div>
 
-          {/* Tabla de Stock con Barra de Filtros y Edición */}
+          {/* Panel Derecho: Pestañas de Stock Actual e Historial de Compras */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
-            <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-              <h2 className="text-lg font-bold text-gray-800">
-                Stock Actual de Equipos y Repuestos{' '}
-                <span className="text-xs font-normal text-gray-500">
-                  ({filteredItems.length} de {items.length} registros)
-                </span>
-              </h2>
-              {hasActiveFilters && (
+            <div className="flex flex-wrap justify-between items-center mb-4 gap-3 border-b pb-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setActiveTab('stock')}
+                  className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                    activeTab === 'stock'
+                      ? 'bg-gray-900 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  Inventario Actual ({items.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab('purchases')}
+                  className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                    activeTab === 'purchases'
+                      ? 'bg-red-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  Historial de Compras ({purchases.length})
+                </button>
+              </div>
+
+              {activeTab === 'stock' && hasActiveFilters && (
                 <button
                   onClick={clearFilters}
                   className="text-xs text-blue-600 hover:underline font-medium"
@@ -474,127 +732,173 @@ export default function Inventory() {
               )}
             </div>
 
-            {/* Barra de Búsqueda y Filtros */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                placeholder="Buscar equipo o pieza..."
-                className="border border-gray-300 p-2 rounded text-xs bg-white"
-              />
-              <select
-                value={filterCategory}
-                onChange={e => setFilterCategory(e.target.value)}
-                className="border border-gray-300 p-2 rounded text-xs bg-white"
-              >
-                <option value="Todas">Todas las categorías</option>
-                <option value="Laptops">Laptops</option>
-                <option value="PCs de Escritorio">PCs de Escritorio</option>
-                <option value="Monitores">Monitores</option>
-                <option value="Componentes">Componentes</option>
-                <option value="Periféricos">Periféricos</option>
-              </select>
-              <select
-                value={filterCondition}
-                onChange={e => setFilterCondition(e.target.value)}
-                className="border border-gray-300 p-2 rounded text-xs bg-white"
-              >
-                <option value="Todos">Todos los estados</option>
-                <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
-                <option value="Usado - Buen estado">Usado - Buen estado</option>
-                <option value="En taller / Para reparación">En taller / Para reparación</option>
-                <option value="Para repuestos">Para repuestos</option>
-              </select>
-              <label className="flex items-center gap-2 text-xs text-gray-700 font-medium px-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={onlyInStock}
-                  onChange={e => setOnlyInStock(e.target.checked)}
-                  className="rounded border-gray-300 text-blue-600"
-                />
-                Solo con stock (&gt; 0)
-              </label>
-            </div>
+            {activeTab === 'stock' ? (
+              <>
+                {/* Barra de Búsqueda y Filtros */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    placeholder="Buscar equipo o pieza..."
+                    className="border border-gray-300 p-2 rounded text-xs bg-white"
+                  />
+                  <select
+                    value={filterCategory}
+                    onChange={e => setFilterCategory(e.target.value)}
+                    className="border border-gray-300 p-2 rounded text-xs bg-white"
+                  >
+                    <option value="Todas">Todas las categorías</option>
+                    <option value="Laptops">Laptops</option>
+                    <option value="PCs de Escritorio">PCs de Escritorio</option>
+                    <option value="Monitores">Monitores</option>
+                    <option value="Componentes">Componentes</option>
+                    <option value="Periféricos">Periféricos</option>
+                  </select>
+                  <select
+                    value={filterCondition}
+                    onChange={e => setFilterCondition(e.target.value)}
+                    className="border border-gray-300 p-2 rounded text-xs bg-white"
+                  >
+                    <option value="Todos">Todos los estados</option>
+                    <option value="Reacondicionado - Grado A">Reacondicionado - Grado A</option>
+                    <option value="Usado - Buen estado">Usado - Buen estado</option>
+                    <option value="En taller / Para reparación">En taller / Para reparación</option>
+                    <option value="Para repuestos">Para repuestos</option>
+                  </select>
+                  <label className="flex items-center gap-2 text-xs text-gray-700 font-medium px-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={onlyInStock}
+                      onChange={e => setOnlyInStock(e.target.checked)}
+                      className="rounded border-gray-300 text-blue-600"
+                    />
+                    Solo con stock (&gt; 0)
+                  </label>
+                </div>
 
-            {loading ? (
-              <p className="text-gray-500 text-sm">Cargando inventario desde Supabase...</p>
-            ) : items.length === 0 ? (
-              <p className="text-gray-500 text-sm">No hay equipos registrados aún. Agrega el primero desde el formulario.</p>
-            ) : filteredItems.length === 0 ? (
-              <p className="text-gray-500 text-sm">Ningún equipo coincide con los filtros aplicados.</p>
+                {loading ? (
+                  <p className="text-gray-500 text-sm">Cargando inventario desde Supabase...</p>
+                ) : items.length === 0 ? (
+                  <p className="text-gray-500 text-sm">No hay equipos registrados aún. Registra tu primera compra desde el formulario.</p>
+                ) : filteredItems.length === 0 ? (
+                  <p className="text-gray-500 text-sm">Ningún equipo coincide con los filtros aplicados.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                          <th className="p-3">Equipo / Pieza</th>
+                          <th className="p-3">Categoría</th>
+                          <th className="p-3">Estado</th>
+                          <th className="p-3">Costo</th>
+                          <th className="p-3">Venta</th>
+                          <th className="p-3 text-center">Stock</th>
+                          <th className="p-3 text-center">Acciones</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y text-sm text-gray-700">
+                        {filteredItems.map(item => (
+                          <tr key={item.id} className="hover:bg-gray-50">
+                            <td className="p-3 font-medium">{item.name}</td>
+                            <td className="p-3 text-xs">{item.category}</td>
+                            <td className="p-3 text-xs">{item.condition}</td>
+                            <td className="p-3">{currency} {item.cost}</td>
+                            <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
+                            <td className="p-3">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  onClick={() => handleUpdateStock(item.id, item.stock, -1)}
+                                  className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
+                                >
+                                  -
+                                </button>
+                                <span className={`font-bold min-w-[1.25rem] text-center ${item.stock === 0 ? 'text-red-600' : ''}`}>
+                                  {item.stock}
+                                </span>
+                                <button
+                                  onClick={() => handleUpdateStock(item.id, item.stock, 1)}
+                                  className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  onClick={() => openEditModal(item)}
+                                  title="Editar equipo, precios o estado"
+                                  className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
+                                >
+                                  Editar
+                                </button>
+                                {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 && (
+                                  <button
+                                    onClick={() => openUpgradeModal(item)}
+                                    title="Instalar RAM, SSD o componente del stock"
+                                    className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-2 py-1 rounded transition"
+                                  >
+                                    + Mejorar
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDeleteEquipment(item)}
+                                  title="Eliminar registro"
+                                  className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
-                      <th className="p-3">Equipo / Pieza</th>
-                      <th className="p-3">Categoría</th>
-                      <th className="p-3">Estado</th>
-                      <th className="p-3">Costo</th>
-                      <th className="p-3">Venta</th>
-                      <th className="p-3 text-center">Stock</th>
-                      <th className="p-3 text-center">Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y text-sm text-gray-700">
-                    {filteredItems.map(item => (
-                      <tr key={item.id} className="hover:bg-gray-50">
-                        <td className="p-3 font-medium">{item.name}</td>
-                        <td className="p-3 text-xs">{item.category}</td>
-                        <td className="p-3 text-xs">{item.condition}</td>
-                        <td className="p-3">{currency} {item.cost}</td>
-                        <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
-                        <td className="p-3">
-                          <div className="flex items-center justify-center gap-1.5">
-                            <button
-                              onClick={() => handleUpdateStock(item.id, item.stock, -1)}
-                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
-                            >
-                              -
-                            </button>
-                            <span className={`font-bold min-w-[1.25rem] text-center ${item.stock === 0 ? 'text-red-600' : ''}`}>
-                              {item.stock}
-                            </span>
-                            <button
-                              onClick={() => handleUpdateStock(item.id, item.stock, 1)}
-                              className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </td>
-                        <td className="p-3">
-                          <div className="flex items-center justify-center gap-1.5">
-                            <button
-                              onClick={() => openEditModal(item)}
-                              title="Editar equipo, precios o estado"
-                              className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
-                            >
-                              Editar
-                            </button>
-                            {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 && (
-                              <button
-                                onClick={() => openUpgradeModal(item)}
-                                title="Instalar RAM, SSD o componente del stock"
-                                className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-2 py-1 rounded transition"
-                              >
-                                + Mejorar
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleDeleteEquipment(item)}
-                              title="Eliminar registro"
-                              className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              /* Tabla de Historial de Compras Descontadas del Capital */
+              <div>
+                {purchases.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    Aún no hay compras registradas con descuento de capital. Al registrar equipos o periféricos con la casilla marcada aparecerán aquí.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                          <th className="p-3">Fecha</th>
+                          <th className="p-3">Equipo / Periférico</th>
+                          <th className="p-3">Categoría</th>
+                          <th className="p-3">Proveedor</th>
+                          <th className="p-3 text-center">Cant.</th>
+                          <th className="p-3">Costo Unit.</th>
+                          <th className="p-3">Total Descontado</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y text-sm text-gray-700">
+                        {purchases.map(p => (
+                          <tr key={p.id} className="hover:bg-gray-50">
+                            <td className="p-3 text-xs text-gray-500">
+                              {new Date(p.created_at).toLocaleDateString()}
+                            </td>
+                            <td className="p-3 font-medium text-gray-900">{p.item_name}</td>
+                            <td className="p-3 text-xs">{p.category}</td>
+                            <td className="p-3 text-xs">{p.supplier || 'Proveedor General'}</td>
+                            <td className="p-3 text-center font-semibold">{p.quantity}</td>
+                            <td className="p-3">{currency} {Number(p.unit_cost).toFixed(2)}</td>
+                            <td className="p-3 font-bold text-red-600">
+                              - {currency} {Number(p.total_cost).toFixed(2)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </div>
