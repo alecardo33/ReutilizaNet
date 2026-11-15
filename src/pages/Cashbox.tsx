@@ -14,6 +14,7 @@ interface CartItem {
   tempId: string
   inventory_id: string | null
   product_name: string
+  serial_number: string
   quantity: number
   unit_cost: number
   unit_price: number
@@ -22,6 +23,7 @@ interface CartItem {
 interface Sale {
   id: string
   product_name: string
+  serial_number?: string
   customer: string
   payment_method: string
   quantity: number
@@ -57,6 +59,7 @@ export default function Cashbox() {
   // Selector de ítem para agregar al carrito
   const [selectedItemId, setSelectedItemId] = useState('')
   const [manualProduct, setManualProduct] = useState('')
+  const [serialNumber, setSerialNumber] = useState('')
   const [quantity, setQuantity] = useState(1)
   const [unitPrice, setUnitPrice] = useState('')
 
@@ -133,6 +136,7 @@ export default function Cashbox() {
   const handleSelectProduct = (itemId: string) => {
     setSelectedItemId(itemId)
     setQuantity(1)
+    setSerialNumber('')
     if (itemId === 'manual' || itemId === '') {
       setUnitPrice('')
       return
@@ -151,6 +155,7 @@ export default function Cashbox() {
 
     const validQty = Math.max(1, Number(quantity))
     const validPrice = Number(unitPrice)
+    const cleanSerial = serialNumber.trim()
 
     if (isNaN(validPrice) || validPrice < 0) {
       alert('Ingresa un precio unitario válido.')
@@ -168,12 +173,14 @@ export default function Cashbox() {
           tempId: crypto.randomUUID(),
           inventory_id: null,
           product_name: manualProduct.trim(),
+          serial_number: cleanSerial,
           quantity: validQty,
           unit_cost: 0,
           unit_price: validPrice
         }
       ])
       setManualProduct('')
+      setSerialNumber('')
       setSelectedItemId('')
       setQuantity(1)
       setUnitPrice('')
@@ -189,9 +196,12 @@ export default function Cashbox() {
       return
     }
 
-    const existingIndex = cart.findIndex(
-      c => c.inventory_id === item.id && c.unit_price === validPrice
-    )
+    // Si tiene número de serie específico, mantener como línea separada; si no, agrupar si coincide precio
+    const existingIndex = !cleanSerial
+      ? cart.findIndex(
+          c => c.inventory_id === item.id && c.unit_price === validPrice && !c.serial_number
+        )
+      : -1
 
     if (existingIndex >= 0) {
       const updated = [...cart]
@@ -204,6 +214,7 @@ export default function Cashbox() {
           tempId: crypto.randomUUID(),
           inventory_id: item.id,
           product_name: item.name,
+          serial_number: cleanSerial,
           quantity: validQty,
           unit_cost: Number(item.cost),
           unit_price: validPrice
@@ -212,6 +223,7 @@ export default function Cashbox() {
     }
 
     setSelectedItemId('')
+    setSerialNumber('')
     setQuantity(1)
     setUnitPrice('')
   }
@@ -220,12 +232,24 @@ export default function Cashbox() {
     setCart(prev => prev.filter(item => item.tempId !== tempId))
   }
 
-  // Helpers para interpretar saldo pagado y pendiente incluso si no existen columnas extra en Supabase
+  // Extraer serie desde columna serial_number o desde sufijo "[S/N: ...]" en product_name si no existe columna
+  const extractSerial = (sale: Sale): string => {
+    if (sale.serial_number && sale.serial_number.trim() !== '') {
+      return sale.serial_number.trim()
+    }
+    const match = sale.product_name?.match(/\[S\/N:\s*([^\]]+)\]/i)
+    return match ? match[1].trim() : ''
+  }
+
+  const cleanProductName = (name: string): string => {
+    return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim()
+  }
+
+  // Helpers para interpretar saldo pagado y pendiente
   const getSalePaidAmount = (sale: Sale): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
     }
-    // Respaldo: extraer "(Pagado: 500.00)" si está guardado en payment_method
     const match = sale.payment_method?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
     if (match) {
       return Number(match[1])
@@ -253,11 +277,13 @@ export default function Cashbox() {
     if (itemsToProcess.length === 0 && selectedItemId) {
       const validQty = Math.max(1, Number(quantity))
       const validPrice = Number(unitPrice)
+      const cleanSerial = serialNumber.trim()
       if (selectedItemId === 'manual' && manualProduct.trim()) {
         itemsToProcess.push({
           tempId: 'direct',
           inventory_id: null,
           product_name: manualProduct.trim(),
+          serial_number: cleanSerial,
           quantity: validQty,
           unit_cost: 0,
           unit_price: validPrice || 0
@@ -269,6 +295,7 @@ export default function Cashbox() {
             tempId: 'direct',
             inventory_id: item.id,
             product_name: item.name,
+            serial_number: cleanSerial,
             quantity: validQty,
             unit_cost: Number(item.cost),
             unit_price: validPrice || Number(item.price)
@@ -320,7 +347,6 @@ export default function Cashbox() {
       }
     }
 
-    // Distribuir proporcionalmente el abono inicial entre los ítems de la nota
     let remainingDeposit = depositNum
     const baseRows = itemsToProcess.map((item, idx) => {
       const lineTotal = Number((item.unit_price * item.quantity).toFixed(2))
@@ -346,6 +372,7 @@ export default function Cashbox() {
       return {
         inventory_id: item.inventory_id,
         product_name: item.product_name,
+        serial_number: item.serial_number || null,
         customer: finalCustomer,
         payment_method: methodLabel,
         quantity: item.quantity,
@@ -357,7 +384,7 @@ export default function Cashbox() {
       }
     })
 
-    // Intentar guardar con columnas amount_paid y payment_status; si no existen en Supabase, guardar con payment_method codificado
+    // Intentar insertar con columnas serial_number, amount_paid y payment_status
     const extendedRows = baseRows.map(({ _linePaid, _linePending, ...rest }) => ({
       ...rest,
       amount_paid: _linePaid,
@@ -368,8 +395,18 @@ export default function Cashbox() {
     let saleError: any = null
 
     const firstAttempt = await supabase.from('sales').insert(extendedRows).select()
-    if (firstAttempt.error && (firstAttempt.error.message.includes('amount_paid') || firstAttempt.error.message.includes('payment_status') || firstAttempt.error.message.includes('column'))) {
-      const fallbackRows = baseRows.map(({ _linePaid, _linePending, ...rest }) => rest)
+    if (
+      firstAttempt.error &&
+      (firstAttempt.error.message.includes('serial_number') ||
+        firstAttempt.error.message.includes('amount_paid') ||
+        firstAttempt.error.message.includes('payment_status') ||
+        firstAttempt.error.message.includes('column'))
+    ) {
+      // Respaldo: incrustar serie en product_name si aún no se ejecutó ALTER TABLE en Supabase
+      const fallbackRows = baseRows.map(({ _linePaid, _linePending, serial_number, product_name, ...rest }) => ({
+        ...rest,
+        product_name: serial_number ? `${product_name} [S/N: ${serial_number}]` : product_name
+      }))
       const secondAttempt = await supabase.from('sales').insert(fallbackRows).select()
       insertedSales = secondAttempt.data
       saleError = secondAttempt.error
@@ -397,6 +434,7 @@ export default function Cashbox() {
     setCart([])
     setSelectedItemId('')
     setManualProduct('')
+    setSerialNumber('')
     setCustomer('')
     setQuantity(1)
     setUnitPrice('')
@@ -410,7 +448,6 @@ export default function Cashbox() {
     }
   }
 
-  // Abrir modal para registrar un abono a una venta a crédito
   const openInstallmentModal = (sale: Sale) => {
     const pending = getSalePendingBalance(sale)
     setTargetCreditSale(sale)
@@ -419,7 +456,6 @@ export default function Cashbox() {
     setPaymentModalOpen(true)
   }
 
-  // Guardar abono parcial o liquidación total
   const handleRegisterInstallment = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!targetCreditSale) return
@@ -503,7 +539,6 @@ export default function Cashbox() {
 
   const cur = settings.currency || 'Bs.'
 
-  // Métricas financieras reales de Caja (Efectivo cobrado vs Cuentas por cobrar)
   const totalSalesAmount = sales.reduce((acc, item) => acc + Number(item.total_amount), 0)
   const totalCollectedCash = sales.reduce((acc, item) => acc + getSalePaidAmount(item), 0)
   const totalReceivable = sales.reduce((acc, item) => acc + getSalePendingBalance(item), 0)
@@ -557,7 +592,7 @@ export default function Cashbox() {
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
             <h1 className="text-2xl font-bold text-gray-800">Módulo de Caja, Ventas y Créditos</h1>
-            <p className="text-sm text-gray-500">Carrito múltiple, control de cuentas por cobrar, abonos parciales y notas de venta con QR</p>
+            <p className="text-sm text-gray-500">Carrito múltiple, registro de N° de Serie por equipo, cuentas por cobrar y notas de venta con QR</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -616,6 +651,19 @@ export default function Cashbox() {
                     />
                   </div>
                 )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    N° de Serie / Service Tag (Para Garantía - Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={serialNumber}
+                    onChange={e => setSerialNumber(e.target.value)}
+                    placeholder="Ej: PF2X9K1L / S/N-884920"
+                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white font-mono"
+                  />
+                </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -676,6 +724,9 @@ export default function Cashbox() {
                     <div key={item.tempId} className="p-2.5 flex justify-between items-center text-xs bg-white">
                       <div className="pr-2">
                         <p className="font-semibold text-gray-800">{item.product_name}</p>
+                        {item.serial_number && (
+                          <p className="text-[11px] font-mono text-blue-700">Serie: {item.serial_number}</p>
+                        )}
                         <p className="text-gray-500">
                           {item.quantity} x {cur} {item.unit_price.toFixed(2)} ={' '}
                           <span className="font-bold text-gray-800">
@@ -838,7 +889,7 @@ export default function Cashbox() {
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
-                        <th className="p-3">Equipo / Concepto</th>
+                        <th className="p-3">Equipo / Serie</th>
                         <th className="p-3">Cliente</th>
                         <th className="p-3">Total</th>
                         <th className="p-3">Pagado</th>
@@ -852,12 +903,16 @@ export default function Cashbox() {
                         const paid = getSalePaidAmount(sale)
                         const pending = getSalePendingBalance(sale)
                         const hasDebt = pending > 0.009
+                        const sn = extractSerial(sale)
                         return (
                           <tr key={sale.id} className={hasDebt ? 'bg-amber-50/40 hover:bg-amber-50' : 'hover:bg-gray-50'}>
                             <td className="p-3">
                               <p className="font-medium text-gray-900">
-                                {sale.quantity > 1 ? `${sale.quantity}x ` : ''}{sale.product_name}
+                                {sale.quantity > 1 ? `${sale.quantity}x ` : ''}{cleanProductName(sale.product_name)}
                               </p>
+                              {sn && (
+                                <p className="text-[11px] font-mono text-blue-700">S/N: {sn}</p>
+                              )}
                               <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
                                 hasDebt
                                   ? 'bg-amber-100 text-amber-800'
@@ -915,7 +970,7 @@ export default function Cashbox() {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Registrar Abono / Pago de Saldo</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Cliente: <span className="font-semibold text-gray-800">{targetCreditSale.customer}</span> — {targetCreditSale.product_name}
+              Cliente: <span className="font-semibold text-gray-800">{targetCreditSale.customer}</span> — {cleanProductName(targetCreditSale.product_name)}
             </p>
 
             <div className="grid grid-cols-3 gap-2 bg-gray-50 p-3 rounded-lg border border-gray-200 text-center mb-4">
@@ -985,12 +1040,12 @@ export default function Cashbox() {
         </div>
       )}
 
-      {/* Modal de Nota de Venta / Recibo Consolidado Imprimible */}
+      {/* Modal de Nota de Venta / Recibo Consolidado Imprimible con Columna Serie */}
       {selectedReceiptGroup && selectedReceiptGroup.length > 0 && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div
             id="printable-receipt"
-            className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 border border-gray-200 my-4"
+            className="bg-white rounded-lg shadow-xl max-w-xl w-full p-6 border border-gray-200 my-4"
           >
             {/* Encabezado Dinámico con Logo y Datos de Configuración */}
             <div className="flex justify-between items-start border-b-2 border-gray-800 pb-3 mb-3 gap-3">
@@ -1044,29 +1099,34 @@ export default function Cashbox() {
               </div>
             </div>
 
-            {/* Tabla Consolidada de Equipos y Servicios */}
+            {/* Tabla Consolidada de Equipos, Series y Servicios */}
             <table className="w-full text-left border-collapse mb-3 text-sm">
               <thead>
                 <tr className="border-b border-gray-300 text-xs uppercase text-gray-600">
                   <th className="py-1.5">Cant.</th>
                   <th className="py-1.5">Descripción</th>
+                  <th className="py-1.5">N° Serie</th>
                   <th className="py-1.5 text-right">P. Unit.</th>
                   <th className="py-1.5 text-right">Subtotal</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {selectedReceiptGroup.map(item => (
-                  <tr key={item.id}>
-                    <td className="py-2 font-semibold">{item.quantity}</td>
-                    <td className="py-2 font-medium text-gray-800">{item.product_name}</td>
-                    <td className="py-2 text-right">
-                      {cur} {(Number(item.total_amount) / Number(item.quantity)).toFixed(2)}
-                    </td>
-                    <td className="py-2 text-right font-bold">
-                      {cur} {Number(item.total_amount).toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
+                {selectedReceiptGroup.map(item => {
+                  const sn = extractSerial(item)
+                  return (
+                    <tr key={item.id}>
+                      <td className="py-2 font-semibold">{item.quantity}</td>
+                      <td className="py-2 font-medium text-gray-800">{cleanProductName(item.product_name)}</td>
+                      <td className="py-2 font-mono text-xs text-gray-700">{sn || '—'}</td>
+                      <td className="py-2 text-right">
+                        {cur} {(Number(item.total_amount) / Number(item.quantity)).toFixed(2)}
+                      </td>
+                      <td className="py-2 text-right font-bold">
+                        {cur} {Number(item.total_amount).toFixed(2)}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
 
