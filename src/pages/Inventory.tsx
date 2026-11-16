@@ -1092,23 +1092,31 @@ export default function Inventory() {
                               </>
                             )}
                             <td className="p-3">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => handleUpdateStock(item.id, item.stock, -1)}
-                                  className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
-                                >
-                                  -
-                                </button>
-                                <span className={`font-bold min-w-[1.25rem] text-center ${item.stock === 0 ? 'text-red-600' : ''}`}>
-                                  {item.stock}
-                                </span>
-                                <button
-                                  onClick={() => handleUpdateStock(item.id, item.stock, 1)}
-                                  className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
-                                >
-                                  +
-                                </button>
-                              </div>
+                              {isAdmin ? (
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    onClick={() => handleUpdateStock(item.id, item.stock, -1)}
+                                    className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
+                                  >
+                                    -
+                                  </button>
+                                  <span className={`font-bold min-w-[1.25rem] text-center ${item.stock === 0 ? 'text-red-600' : ''}`}>
+                                    {item.stock}
+                                  </span>
+                                  <button
+                                    onClick={() => handleUpdateStock(item.id, item.stock, 1)}
+                                    className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-0.5 rounded font-bold text-xs"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="text-center">
+                                  <span className={`font-bold px-2.5 py-0.5 rounded-full text-xs ${item.stock === 0 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-800'}`}>
+                                    {item.stock}
+                                  </span>
+                                </div>
+                              )}
                             </td>
                             <td className="p-3">
                               <div className="flex items-center justify-center gap-1.5">
