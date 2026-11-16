@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+﻿import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabaseAdminAuth, supabase } from '../lib/supabase'
 
@@ -128,7 +128,6 @@ export default function AdminUsers() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Formulario de creación */}
           <div className="bg-white p-6 rounded-lg shadow h-fit">
             <h2 className="text-lg font-bold text-gray-800 mb-4">Registrar Nuevo Usuario</h2>
             <form onSubmit={handleCreateUser} className="space-y-4">
@@ -189,7 +188,6 @@ export default function AdminUsers() {
             </form>
           </div>
 
-          {/* Lista de usuarios y selector de rol */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
             <h2 className="text-lg font-bold text-gray-800 mb-4">Usuarios Registrados y Roles</h2>
             {loadingUsers ? (
