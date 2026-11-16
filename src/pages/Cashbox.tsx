@@ -34,6 +34,16 @@ interface Sale {
   created_at: string
 }
 
+interface Expense {
+  id: string
+  description: string
+  category: string
+  amount: number
+  payment_method: string
+  notes?: string
+  created_at: string
+}
+
 interface CompanySettings {
   company_name: string
   nit: string
@@ -53,8 +63,15 @@ export default function Cashbox() {
   const navigate = useNavigate()
   const [inventory, setInventory] = useState<InventoryItem[]>([])
   const [sales, setSales] = useState<Sale[]>([])
+  const [expenses, setExpenses] = useState<Expense[]>([])
   const [loading, setLoading] = useState(true)
   const [processing, setProcessing] = useState(false)
+
+  // Pestaña activa en el panel izquierdo: 'sale' (Venta) o 'expense' (Gasto / Egreso)
+  const [leftTab, setLeftTab] = useState<'sale' | 'expense'>('sale')
+
+  // Pestaña activa en el panel derecho: 'sales' (Historial Ventas) o 'expenses' (Historial Gastos)
+  const [rightTab, setRightTab] = useState<'sales' | 'expenses'>('sales')
 
   // Selector de ítem para agregar al carrito
   const [selectedItemId, setSelectedItemId] = useState('')
@@ -71,7 +88,15 @@ export default function Cashbox() {
   const [paymentMethod, setPaymentMethod] = useState('Efectivo (Contado)')
   const [initialDeposit, setInitialDeposit] = useState('')
 
-  // Filtro en historial (Todas / Cuentas por Cobrar)
+  // Formulario de Gastos Operativos (Salarios, Pasajes, Servicios, etc.)
+  const [expenseDesc, setExpenseDesc] = useState('')
+  const [expenseCategory, setExpenseCategory] = useState('Salarios / Sueldos')
+  const [expenseAmount, setExpenseAmount] = useState('')
+  const [expenseMethod, setExpenseMethod] = useState('Efectivo (Caja)')
+  const [expenseNotes, setExpenseNotes] = useState('')
+  const [savingExpense, setSavingExpense] = useState(false)
+
+  // Filtro en historial de ventas (Todas / Cuentas por Cobrar)
   const [historyFilter, setHistoryFilter] = useState<'all' | 'pending'>('all')
 
   // Modal de Registro de Abono / Cuota
@@ -81,7 +106,7 @@ export default function Cashbox() {
   const [installmentMethod, setInstallmentMethod] = useState('Efectivo (Contado)')
   const [savingInstallment, setSavingInstallment] = useState(false)
 
-  // Modal de comprobante / nota de venta (agrupa ventas del mismo lote)
+  // Modal de comprobante / nota de venta
   const [selectedReceiptGroup, setSelectedReceiptGroup] = useState<Sale[] | null>(null)
   const [warrantyNotes, setWarrantyNotes] = useState('30 días de garantía por defectos de hardware.')
 
@@ -106,14 +131,16 @@ export default function Cashbox() {
 
   const fetchData = async () => {
     setLoading(true)
-    const [invRes, salesRes, settingsRes] = await Promise.all([
+    const [invRes, salesRes, settingsRes, expensesRes] = await Promise.all([
       supabase.from('inventory').select('id, name, cost, price, stock').gt('stock', 0).order('name'),
       supabase.from('sales').select('*').order('created_at', { ascending: false }),
-      supabase.from('company_settings').select('*').eq('id', 1).single()
+      supabase.from('company_settings').select('*').eq('id', 1).single(),
+      supabase.from('expenses').select('*').order('created_at', { ascending: false })
     ])
 
     if (invRes.data) setInventory(invRes.data)
     if (salesRes.data) setSales(salesRes.data)
+    if (!expensesRes.error && expensesRes.data) setExpenses(expensesRes.data)
     if (settingsRes.data) {
       setSettings(settingsRes.data)
       if (settingsRes.data.warranty_notes) {
@@ -121,6 +148,53 @@ export default function Cashbox() {
       }
     }
     setLoading(false)
+  }
+
+  // Registrar nuevo gasto en caja
+  const handleRegisterExpense = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const amountNum = Number(expenseAmount)
+    if (!expenseDesc.trim()) return
+    if (isNaN(amountNum) || amountNum <= 0) {
+      alert('Ingresa un monto de gasto válido mayor a 0.')
+      return
+    }
+
+    setSavingExpense(true)
+    const { data: { user } } = await supabase.auth.getUser()
+
+    const { error } = await supabase.from('expenses').insert([
+      {
+        description: expenseDesc.trim(),
+        category: expenseCategory,
+        amount: Number(amountNum.toFixed(2)),
+        payment_method: expenseMethod,
+        notes: expenseNotes.trim() || null,
+        created_by: user?.id
+      }
+    ])
+
+    if (error) {
+      alert('Error al registrar gasto (verifica haber ejecutado el SQL de la tabla expenses en Supabase): ' + error.message)
+    } else {
+      setExpenseDesc('')
+      setExpenseAmount('')
+      setExpenseNotes('')
+      setRightTab('expenses')
+      await fetchData()
+    }
+    setSavingExpense(false)
+  }
+
+  const handleDeleteExpense = async (exp: Expense) => {
+    const ok = window.confirm(`¿Eliminar el gasto "${exp.description}" por ${cur} ${Number(exp.amount).toFixed(2)}?`)
+    if (!ok) return
+    const { error } = await supabase.from('expenses').delete().eq('id', exp.id)
+    if (!error) {
+      setExpenses(prev => prev.filter(item => item.id !== exp.id))
+    } else {
+      alert('No se pudo eliminar el gasto: ' + error.message)
+    }
   }
 
   // Calcular stock disponible real restando lo que ya está en el carrito
@@ -196,7 +270,6 @@ export default function Cashbox() {
       return
     }
 
-    // Si tiene número de serie específico, mantener como línea separada; si no, agrupar si coincide precio
     const existingIndex = !cleanSerial
       ? cart.findIndex(
           c => c.inventory_id === item.id && c.unit_price === validPrice && !c.serial_number
@@ -232,7 +305,6 @@ export default function Cashbox() {
     setCart(prev => prev.filter(item => item.tempId !== tempId))
   }
 
-  // Extraer serie desde columna serial_number o desde sufijo "[S/N: ...]" en product_name si no existe columna
   const extractSerial = (sale: Sale): string => {
     if (sale.serial_number && sale.serial_number.trim() !== '') {
       return sale.serial_number.trim()
@@ -245,7 +317,6 @@ export default function Cashbox() {
     return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim()
   }
 
-  // Helpers para interpretar saldo pagado y pendiente
   const getSalePaidAmount = (sale: Sale): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
@@ -384,7 +455,6 @@ export default function Cashbox() {
       }
     })
 
-    // Intentar insertar con columnas serial_number, amount_paid y payment_status
     const extendedRows = baseRows.map(({ _linePaid, _linePending, ...rest }) => ({
       ...rest,
       amount_paid: _linePaid,
@@ -402,7 +472,6 @@ export default function Cashbox() {
         firstAttempt.error.message.includes('payment_status') ||
         firstAttempt.error.message.includes('column'))
     ) {
-      // Respaldo: incrustar serie en product_name si aún no se ejecutó ALTER TABLE en Supabase
       const fallbackRows = baseRows.map(({ _linePaid, _linePending, serial_number, product_name, ...rest }) => ({
         ...rest,
         product_name: serial_number ? `${product_name} [S/N: ${serial_number}]` : product_name
@@ -440,6 +509,7 @@ export default function Cashbox() {
     setUnitPrice('')
     setInitialDeposit('')
     setPaymentMethod('Efectivo (Contado)')
+    setRightTab('sales')
     await fetchData()
     setProcessing(false)
 
@@ -539,8 +609,9 @@ export default function Cashbox() {
 
   const cur = settings.currency || 'Bs.'
 
-  const totalSalesAmount = sales.reduce((acc, item) => acc + Number(item.total_amount), 0)
   const totalCollectedCash = sales.reduce((acc, item) => acc + getSalePaidAmount(item), 0)
+  const totalExpensesAmount = expenses.reduce((acc, item) => acc + Number(item.amount || 0), 0)
+  const netCashInBox = totalCollectedCash - totalExpensesAmount
   const totalReceivable = sales.reduce((acc, item) => acc + getSalePendingBalance(item), 0)
   const pendingSalesCount = sales.filter(isCreditPending).length
 
@@ -591,8 +662,8 @@ export default function Cashbox() {
       <div className="max-w-7xl mx-auto">
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Módulo de Caja, Ventas y Créditos</h1>
-            <p className="text-sm text-gray-500">Carrito múltiple, registro de N° de Serie por equipo, cuentas por cobrar y notas de venta con QR</p>
+            <h1 className="text-2xl font-bold text-gray-800">Módulo de Caja, Ventas, Créditos y Gastos</h1>
+            <p className="text-sm text-gray-500">Cobros con N° de Serie, cuentas por cobrar, pago de salarios, pasajes y egresos operativos</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -614,350 +685,549 @@ export default function Cashbox() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Panel Izquierdo: Constructor de Venta / Carrito */}
+          {/* Panel Izquierdo: Selector entre Nueva Venta y Registrar Gasto */}
           <div className="bg-white p-6 rounded-lg shadow h-fit space-y-5">
-            <div>
-              <h2 className="text-lg font-bold text-gray-800 mb-3">1. Agregar Ítems a la Venta</h2>
-              <div className="space-y-3 bg-gray-50 p-3.5 rounded-lg border border-gray-200">
+            <div className="grid grid-cols-2 gap-1.5 bg-gray-100 p-1 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setLeftTab('sale')}
+                className={`py-2 rounded text-xs font-bold transition ${
+                  leftTab === 'sale'
+                    ? 'bg-green-600 text-white shadow-sm'
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                + Registrar Venta
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab('expense')}
+                className={`py-2 rounded text-xs font-bold transition ${
+                  leftTab === 'expense'
+                    ? 'bg-red-600 text-white shadow-sm'
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                - Registrar Gasto / Salario
+              </button>
+            </div>
+
+            {leftTab === 'sale' ? (
+              <>
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Equipo o Servicio</label>
+                  <h2 className="text-lg font-bold text-gray-800 mb-3">1. Agregar Ítems a la Venta</h2>
+                  <div className="space-y-3 bg-gray-50 p-3.5 rounded-lg border border-gray-200">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Equipo o Servicio</label>
+                      <select
+                        value={selectedItemId}
+                        onChange={e => handleSelectProduct(e.target.value)}
+                        className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                      >
+                        <option value="">-- Elegir producto --</option>
+                        {inventory.map(item => {
+                          const avail = getAvailableStock(item.id)
+                          return (
+                            <option key={item.id} value={item.id} disabled={avail === 0}>
+                              {item.name} (Disp: {avail} | {cur} {item.price})
+                            </option>
+                          )
+                        })}
+                        <option value="manual">+ Otro servicio / venta manual</option>
+                      </select>
+                    </div>
+
+                    {selectedItemId === 'manual' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Descripción / Servicio</label>
+                        <input
+                          type="text"
+                          value={manualProduct}
+                          onChange={e => setManualProduct(e.target.value)}
+                          placeholder="Ej: Mantenimiento / Instalación SSD"
+                          className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        N° de Serie / Service Tag (Para Garantía - Opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={serialNumber}
+                        onChange={e => setSerialNumber(e.target.value)}
+                        placeholder="Ej: PF2X9K1L / S/N-884920"
+                        className="w-full border border-gray-300 p-2 rounded text-sm bg-white font-mono"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={quantity}
+                          onChange={e => setQuantity(Math.max(1, Number(e.target.value)))}
+                          className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Unit. ({cur})</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={unitPrice}
+                          onChange={e => setUnitPrice(e.target.value)}
+                          placeholder="0.00"
+                          className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleAddToCart}
+                      className="w-full bg-blue-600 text-white font-semibold py-2 rounded text-sm hover:bg-blue-700 transition"
+                    >
+                      + Agregar al Carrito
+                    </button>
+                  </div>
+                </div>
+
+                {/* Lista del Carrito */}
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <h3 className="text-sm font-bold text-gray-800 uppercase">Detalle del Carrito ({cart.length})</h3>
+                    {cart.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setCart([])}
+                        className="text-xs text-red-600 hover:underline"
+                      >
+                        Vaciar
+                      </button>
+                    )}
+                  </div>
+
+                  {cart.length === 0 ? (
+                    <p className="text-xs text-gray-400 italic border border-dashed border-gray-300 rounded p-3 text-center">
+                      Aún no agregaste productos. Puedes sumar varios equipos o servicios aquí.
+                    </p>
+                  ) : (
+                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-200 max-h-48 overflow-y-auto">
+                      {cart.map(item => (
+                        <div key={item.tempId} className="p-2.5 flex justify-between items-center text-xs bg-white">
+                          <div className="pr-2">
+                            <p className="font-semibold text-gray-800">{item.product_name}</p>
+                            {item.serial_number && (
+                              <p className="text-[11px] font-mono text-blue-700">Serie: {item.serial_number}</p>
+                            )}
+                            <p className="text-gray-500">
+                              {item.quantity} x {cur} {item.unit_price.toFixed(2)} ={' '}
+                              <span className="font-bold text-gray-800">
+                                {cur} {(item.quantity * item.unit_price).toFixed(2)}
+                              </span>
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveFromCart(item.tempId)}
+                            className="text-red-600 hover:bg-red-50 px-2 py-1 rounded font-bold"
+                            title="Quitar ítem"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {cart.length > 0 && (
+                    <div className="mt-2 bg-green-50 border border-green-200 rounded p-2.5 flex justify-between items-center">
+                      <span className="text-xs font-bold text-green-900 uppercase">Total Carrito:</span>
+                      <span className="text-lg font-extrabold text-green-700">
+                        {cur} {cartTotal.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Datos de Cliente, Pago y Abono Inicial */}
+                <form onSubmit={handleConfirmCartSale} className="space-y-3 border-t pt-4">
+                  <h2 className="text-sm font-bold text-gray-800 uppercase">2. Datos del Cliente y Pago</h2>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Nombre del Cliente {paymentMethod === 'Crédito / Por Cobrar' ? <span className="text-red-600">* (Obligatorio)</span> : '(Opcional)'}
+                    </label>
+                    <input
+                      type="text"
+                      value={customer}
+                      onChange={e => setCustomer(e.target.value)}
+                      required={paymentMethod === 'Crédito / Por Cobrar'}
+                      placeholder="Ej: Ana Gómez / Cliente Mostrador"
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Modalidad / Método de Pago</label>
+                    <select
+                      value={paymentMethod}
+                      onChange={e => setPaymentMethod(e.target.value)}
+                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                    >
+                      <option value="Efectivo (Contado)">Efectivo (Contado)</option>
+                      <option value="Transferencia / QR">Transferencia / QR</option>
+                      <option value="Crédito / Por Cobrar">Crédito / Por Cobrar (Con Abonos)</option>
+                      <option value="Tarjeta">Tarjeta de Débito / Crédito</option>
+                    </select>
+                  </div>
+
+                  {paymentMethod === 'Crédito / Por Cobrar' && (
+                    <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 space-y-2">
+                      <label className="block text-xs font-bold text-amber-900">
+                        Abono Inicial / Cuota de Entrada ({cur})
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={initialDeposit}
+                        onChange={e => setInitialDeposit(e.target.value)}
+                        placeholder="0.00 (deja 0 si no deja adelanto)"
+                        className="w-full border border-amber-400 p-2 rounded text-sm bg-white font-semibold"
+                      />
+                      <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
+                        <span className="text-amber-800">Saldo pendiente por cobrar:</span>
+                        <span className="font-bold text-red-700">
+                          {cur} {Math.max(0, previewPendingTotal - (Number(initialDeposit) || 0)).toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={processing}
+                    className="w-full bg-green-600 text-white font-semibold py-2.5 rounded hover:bg-green-700 transition shadow-sm"
+                  >
+                    {processing
+                      ? 'Procesando Venta...'
+                      : cart.length > 0
+                      ? `Confirmar Venta (${cur} ${cartTotal.toFixed(2)})`
+                      : 'Confirmar Venta y Generar Nota'}
+                  </button>
+                </form>
+              </>
+            ) : (
+              /* FORMULARIO DE GASTOS OPERATIVOS (SALARIOS, PASAJES, SERVICIOS) */
+              <form onSubmit={handleRegisterExpense} className="space-y-4">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-800">Registrar Gasto / Salida de Caja</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Descuenta directamente del efectivo en caja y de la utilidad neta del negocio.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Categoría del Gasto</label>
                   <select
-                    value={selectedItemId}
-                    onChange={e => handleSelectProduct(e.target.value)}
+                    value={expenseCategory}
+                    onChange={e => setExpenseCategory(e.target.value)}
                     className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
                   >
-                    <option value="">-- Elegir producto --</option>
-                    {inventory.map(item => {
-                      const avail = getAvailableStock(item.id)
-                      return (
-                        <option key={item.id} value={item.id} disabled={avail === 0}>
-                          {item.name} (Disp: {avail} | {cur} {item.price})
-                        </option>
-                      )
-                    })}
-                    <option value="manual">+ Otro servicio / venta manual</option>
+                    <option value="Salarios / Sueldos">Salarios / Sueldos</option>
+                    <option value="Pasajes / Transporte">Pasajes / Transporte / Envíos</option>
+                    <option value="Alquiler / Servicios Básicos">Alquiler / Luz / Agua / Internet</option>
+                    <option value="Insumos de Taller / Limpieza">Insumos de Taller / Limpieza</option>
+                    <option value="Alimentación / Refrigerio">Alimentación / Refrigerio</option>
+                    <option value="Otros Gastos Operativos">Otros Gastos Operativos</option>
                   </select>
                 </div>
 
-                {selectedItemId === 'manual' && (
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Descripción / Servicio</label>
-                    <input
-                      type="text"
-                      value={manualProduct}
-                      onChange={e => setManualProduct(e.target.value)}
-                      placeholder="Ej: Mantenimiento / Instalación SSD"
-                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                    />
-                  </div>
-                )}
-
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    N° de Serie / Service Tag (Para Garantía - Opcional)
-                  </label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Concepto / Descripción</label>
                   <input
                     type="text"
-                    value={serialNumber}
-                    onChange={e => setSerialNumber(e.target.value)}
-                    placeholder="Ej: PF2X9K1L / S/N-884920"
-                    className="w-full border border-gray-300 p-2 rounded text-sm bg-white font-mono"
+                    value={expenseDesc}
+                    onChange={e => setExpenseDesc(e.target.value)}
+                    required
+                    placeholder="Ej: Pago sueldo técnico / Pasajes entrega laptop"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quantity}
-                      onChange={e => setQuantity(Math.max(1, Number(e.target.value)))}
-                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Unit. ({cur})</label>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Monto ({cur})</label>
                     <input
                       type="number"
                       step="0.01"
-                      value={unitPrice}
-                      onChange={e => setUnitPrice(e.target.value)}
+                      min="0.01"
+                      value={expenseAmount}
+                      onChange={e => setExpenseAmount(e.target.value)}
+                      required
                       placeholder="0.00"
-                      className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
+                      className="w-full border border-red-300 p-2 rounded text-sm font-bold text-red-700"
                     />
                   </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Origen del Pago</label>
+                    <select
+                      value={expenseMethod}
+                      onChange={e => setExpenseMethod(e.target.value)}
+                      className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
+                    >
+                      <option value="Efectivo (Caja)">Efectivo (Caja)</option>
+                      <option value="Transferencia / QR">Transferencia / QR</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Observación / Beneficiario (Opcional)</label>
+                  <input
+                    type="text"
+                    value={expenseNotes}
+                    onChange={e => setExpenseNotes(e.target.value)}
+                    placeholder="Ej: Daniel Coronado - Quincena / Recibo N° 12"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
                 </div>
 
                 <button
-                  type="button"
-                  onClick={handleAddToCart}
-                  className="w-full bg-blue-600 text-white font-semibold py-2 rounded text-sm hover:bg-blue-700 transition"
+                  type="submit"
+                  disabled={savingExpense}
+                  className="w-full bg-red-600 text-white font-semibold py-2.5 rounded hover:bg-red-700 transition shadow-sm"
                 >
-                  + Agregar al Carrito
+                  {savingExpense
+                    ? 'Registrando gasto...'
+                    : `Registrar Gasto (- ${cur} ${(Number(expenseAmount) || 0).toFixed(2)})`}
                 </button>
+              </form>
+            )}
+          </div>
+
+          {/* Panel Derecho: Resumen de Caja + Historial de Ventas y Gastos */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Tarjetas de Resumen de Caja */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white p-4 rounded-lg shadow border-l-4 border-green-600">
+                <p className="text-xs text-gray-500 uppercase font-semibold">Ingresos Cobrados</p>
+                <h3 className="text-xl font-bold text-green-700 mt-1">{cur} {totalCollectedCash.toFixed(2)}</h3>
+                <p className="text-[11px] text-gray-400 mt-0.5">Contado + abonos ventas</p>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-600">
+                <p className="text-xs text-gray-500 uppercase font-semibold">Gastos / Salarios</p>
+                <h3 className="text-xl font-bold text-red-600 mt-1">- {cur} {totalExpensesAmount.toFixed(2)}</h3>
+                <p className="text-[11px] text-gray-400 mt-0.5">{expenses.length} gasto(s) registrado(s)</p>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow border-l-4 border-emerald-700">
+                <p className="text-xs text-gray-500 uppercase font-semibold">Saldo Neto en Caja</p>
+                <h3 className={`text-xl font-bold mt-1 ${netCashInBox >= 0 ? 'text-emerald-800' : 'text-red-700'}`}>
+                  {cur} {netCashInBox.toFixed(2)}
+                </h3>
+                <p className="text-[11px] text-gray-400 mt-0.5">Ingresos menos gastos</p>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow border-l-4 border-amber-500">
+                <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Cobrar</p>
+                <h3 className="text-xl font-bold text-amber-600 mt-1">{cur} {totalReceivable.toFixed(2)}</h3>
+                <p className="text-[11px] text-gray-500 mt-0.5">{pendingSalesCount} crédito(s) cliente</p>
               </div>
             </div>
 
-            {/* Lista del Carrito */}
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <h3 className="text-sm font-bold text-gray-800 uppercase">Detalle del Carrito ({cart.length})</h3>
-                {cart.length > 0 && (
+            {/* Historial de Ventas y Gastos */}
+            <div className="bg-white p-6 rounded-lg shadow">
+              <div className="flex flex-wrap justify-between items-center mb-4 gap-3 border-b pb-3">
+                <div className="flex gap-2">
                   <button
-                    type="button"
-                    onClick={() => setCart([])}
-                    className="text-xs text-red-600 hover:underline"
+                    onClick={() => setRightTab('sales')}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                      rightTab === 'sales'
+                        ? 'bg-gray-900 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
                   >
-                    Vaciar
+                    Ventas y Créditos ({sales.length})
                   </button>
+                  <button
+                    onClick={() => setRightTab('expenses')}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                      rightTab === 'expenses'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    Gastos Operativos ({expenses.length})
+                  </button>
+                </div>
+
+                {rightTab === 'sales' && (
+                  <div className="flex gap-2 bg-gray-100 p-1 rounded-lg">
+                    <button
+                      onClick={() => setHistoryFilter('all')}
+                      className={`px-3 py-1 rounded text-xs font-semibold transition ${
+                        historyFilter === 'all'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      }`}
+                    >
+                      Todas ({sales.length})
+                    </button>
+                    <button
+                      onClick={() => setHistoryFilter('pending')}
+                      className={`px-3 py-1 rounded text-xs font-semibold transition ${
+                        historyFilter === 'pending'
+                          ? 'bg-amber-500 text-white shadow-sm'
+                          : 'text-amber-700 hover:bg-amber-100'
+                      }`}
+                    >
+                      Por Cobrar ({pendingSalesCount})
+                    </button>
+                  </div>
                 )}
               </div>
 
-              {cart.length === 0 ? (
-                <p className="text-xs text-gray-400 italic border border-dashed border-gray-300 rounded p-3 text-center">
-                  Aún no agregaste productos. Puedes sumar varios equipos o servicios aquí.
-                </p>
-              ) : (
-                <div className="border border-gray-200 rounded-lg divide-y divide-gray-200 max-h-48 overflow-y-auto">
-                  {cart.map(item => (
-                    <div key={item.tempId} className="p-2.5 flex justify-between items-center text-xs bg-white">
-                      <div className="pr-2">
-                        <p className="font-semibold text-gray-800">{item.product_name}</p>
-                        {item.serial_number && (
-                          <p className="text-[11px] font-mono text-blue-700">Serie: {item.serial_number}</p>
-                        )}
-                        <p className="text-gray-500">
-                          {item.quantity} x {cur} {item.unit_price.toFixed(2)} ={' '}
-                          <span className="font-bold text-gray-800">
-                            {cur} {(item.quantity * item.unit_price).toFixed(2)}
-                          </span>
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveFromCart(item.tempId)}
-                        className="text-red-600 hover:bg-red-50 px-2 py-1 rounded font-bold"
-                        title="Quitar ítem"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {cart.length > 0 && (
-                <div className="mt-2 bg-green-50 border border-green-200 rounded p-2.5 flex justify-between items-center">
-                  <span className="text-xs font-bold text-green-900 uppercase">Total Carrito:</span>
-                  <span className="text-lg font-extrabold text-green-700">
-                    {cur} {cartTotal.toFixed(2)}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Datos de Cliente, Pago y Abono Inicial */}
-            <form onSubmit={handleConfirmCartSale} className="space-y-3 border-t pt-4">
-              <h2 className="text-sm font-bold text-gray-800 uppercase">2. Datos del Cliente y Pago</h2>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Nombre del Cliente {paymentMethod === 'Crédito / Por Cobrar' ? <span className="text-red-600">* (Obligatorio)</span> : '(Opcional)'}
-                </label>
-                <input
-                  type="text"
-                  value={customer}
-                  onChange={e => setCustomer(e.target.value)}
-                  required={paymentMethod === 'Crédito / Por Cobrar'}
-                  placeholder="Ej: Ana Gómez / Cliente Mostrador"
-                  className="w-full border border-gray-300 p-2 rounded text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Modalidad / Método de Pago</label>
-                <select
-                  value={paymentMethod}
-                  onChange={e => setPaymentMethod(e.target.value)}
-                  className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
-                >
-                  <option value="Efectivo (Contado)">Efectivo (Contado)</option>
-                  <option value="Transferencia / QR">Transferencia / QR</option>
-                  <option value="Crédito / Por Cobrar">Crédito / Por Cobrar (Con Abonos)</option>
-                  <option value="Tarjeta">Tarjeta de Débito / Crédito</option>
-                </select>
-              </div>
-
-              {paymentMethod === 'Crédito / Por Cobrar' && (
-                <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 space-y-2">
-                  <label className="block text-xs font-bold text-amber-900">
-                    Abono Inicial / Cuota de Entrada ({cur})
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={initialDeposit}
-                    onChange={e => setInitialDeposit(e.target.value)}
-                    placeholder="0.00 (deja 0 si no deja adelanto)"
-                    className="w-full border border-amber-400 p-2 rounded text-sm bg-white font-semibold"
-                  />
-                  <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
-                    <span className="text-amber-800">Saldo pendiente por cobrar:</span>
-                    <span className="font-bold text-red-700">
-                      {cur} {Math.max(0, previewPendingTotal - (Number(initialDeposit) || 0)).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={processing}
-                className="w-full bg-green-600 text-white font-semibold py-2.5 rounded hover:bg-green-700 transition shadow-sm"
-              >
-                {processing
-                  ? 'Procesando Venta...'
-                  : cart.length > 0
-                  ? `Confirmar Venta (${cur} ${cartTotal.toFixed(2)})`
-                  : 'Confirmar Venta y Generar Nota'}
-              </button>
-            </form>
-          </div>
-
-          {/* Panel Derecho: Resumen de Caja + Cuentas por Cobrar + Historial */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Tarjetas de Resumen de Caja */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-white p-5 rounded-lg shadow border-l-4 border-green-600">
-                <p className="text-xs text-gray-500 uppercase font-semibold">Dinero Real Cobrado en Caja</p>
-                <h3 className="text-2xl font-bold text-green-700 mt-1">{cur} {totalCollectedCash.toFixed(2)}</h3>
-                <p className="text-[11px] text-gray-400 mt-1">Contado + abonos recibidos</p>
-              </div>
-              <div className="bg-white p-5 rounded-lg shadow border-l-4 border-amber-500">
-                <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Cobrar (Créditos)</p>
-                <h3 className="text-2xl font-bold text-amber-600 mt-1">{cur} {totalReceivable.toFixed(2)}</h3>
-                <p className="text-[11px] text-gray-500 mt-1">{pendingSalesCount} operación(es) con saldo</p>
-              </div>
-              <div className="bg-white p-5 rounded-lg shadow border-l-4 border-blue-600">
-                <p className="text-xs text-gray-500 uppercase font-semibold">Total Facturado Bruto</p>
-                <h3 className="text-2xl font-bold text-gray-800 mt-1">{cur} {totalSalesAmount.toFixed(2)}</h3>
-                <p className="text-[11px] text-gray-400 mt-1">{sales.length} ítems vendidos</p>
-              </div>
-            </div>
-
-            {/* Historial y Control de Créditos */}
-            <div className="bg-white p-6 rounded-lg shadow">
-              <div className="flex flex-wrap justify-between items-center mb-4 gap-3">
-                <h2 className="text-lg font-bold text-gray-800">
-                  {historyFilter === 'pending' ? 'Cuentas por Cobrar Pendientes' : 'Historial de Ventas y Créditos'}
-                </h2>
-                <div className="flex gap-2 bg-gray-100 p-1 rounded-lg">
-                  <button
-                    onClick={() => setHistoryFilter('all')}
-                    className={`px-3 py-1 rounded text-xs font-semibold transition ${
-                      historyFilter === 'all'
-                        ? 'bg-white text-gray-900 shadow-sm'
-                        : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  >
-                    Todas ({sales.length})
-                  </button>
-                  <button
-                    onClick={() => setHistoryFilter('pending')}
-                    className={`px-3 py-1 rounded text-xs font-semibold transition ${
-                      historyFilter === 'pending'
-                        ? 'bg-amber-500 text-white shadow-sm'
-                        : 'text-amber-700 hover:bg-amber-100'
-                    }`}
-                  >
-                    Por Cobrar ({pendingSalesCount})
-                  </button>
-                </div>
-              </div>
-
               {loading ? (
-                <p className="text-sm text-gray-500">Cargando ventas...</p>
-              ) : displayedSales.length === 0 ? (
-                <p className="text-sm text-gray-500">
-                  {historyFilter === 'pending'
-                    ? 'No tienes cuentas por cobrar pendientes. ¡Todo está al día!'
-                    : 'Aún no hay ventas registradas en la base de datos.'}
-                </p>
+                <p className="text-sm text-gray-500">Cargando movimientos...</p>
+              ) : rightTab === 'sales' ? (
+                displayedSales.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    {historyFilter === 'pending'
+                      ? 'No tienes cuentas por cobrar pendientes. ¡Todo está al día!'
+                      : 'Aún no hay ventas registradas en la base de datos.'}
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                          <th className="p-3">Equipo / Serie</th>
+                          <th className="p-3">Cliente</th>
+                          <th className="p-3">Total</th>
+                          <th className="p-3">Pagado</th>
+                          <th className="p-3">Saldo</th>
+                          <th className="p-3">Fecha</th>
+                          <th className="p-3 text-center">Acciones</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y text-sm text-gray-700">
+                        {displayedSales.map(sale => {
+                          const paid = getSalePaidAmount(sale)
+                          const pending = getSalePendingBalance(sale)
+                          const hasDebt = pending > 0.009
+                          const sn = extractSerial(sale)
+                          return (
+                            <tr key={sale.id} className={hasDebt ? 'bg-amber-50/40 hover:bg-amber-50' : 'hover:bg-gray-50'}>
+                              <td className="p-3">
+                                <p className="font-medium text-gray-900">
+                                  {sale.quantity > 1 ? `${sale.quantity}x ` : ''}{cleanProductName(sale.product_name)}
+                                </p>
+                                {sn && (
+                                  <p className="text-[11px] font-mono text-blue-700">S/N: {sn}</p>
+                                )}
+                                <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
+                                  hasDebt
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : 'bg-green-100 text-green-800'
+                                }`}>
+                                  {hasDebt ? 'Crédito Pendiente' : 'Pagado'}
+                                </span>
+                              </td>
+                              <td className="p-3 font-medium">{sale.customer}</td>
+                              <td className="p-3 font-semibold">{cur} {Number(sale.total_amount).toFixed(2)}</td>
+                              <td className="p-3 text-green-700 font-semibold">{cur} {paid.toFixed(2)}</td>
+                              <td className="p-3">
+                                {hasDebt ? (
+                                  <span className="font-bold text-red-600">{cur} {pending.toFixed(2)}</span>
+                                ) : (
+                                  <span className="text-xs text-gray-400">{cur} 0.00</span>
+                                )}
+                              </td>
+                              <td className="p-3 text-gray-500 text-xs">
+                                {new Date(sale.created_at).toLocaleDateString()}
+                              </td>
+                              <td className="p-3">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  {hasDebt && (
+                                    <button
+                                      onClick={() => openInstallmentModal(sale)}
+                                      className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded text-xs font-semibold transition"
+                                    >
+                                      + Abonar
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => handleOpenHistoryReceipt(sale)}
+                                    className="bg-gray-800 text-white px-2.5 py-1 rounded text-xs hover:bg-gray-900 transition"
+                                  >
+                                    Nota
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
-                        <th className="p-3">Equipo / Serie</th>
-                        <th className="p-3">Cliente</th>
-                        <th className="p-3">Total</th>
-                        <th className="p-3">Pagado</th>
-                        <th className="p-3">Saldo</th>
-                        <th className="p-3">Fecha</th>
-                        <th className="p-3 text-center">Acciones</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y text-sm text-gray-700">
-                      {displayedSales.map(sale => {
-                        const paid = getSalePaidAmount(sale)
-                        const pending = getSalePendingBalance(sale)
-                        const hasDebt = pending > 0.009
-                        const sn = extractSerial(sale)
-                        return (
-                          <tr key={sale.id} className={hasDebt ? 'bg-amber-50/40 hover:bg-amber-50' : 'hover:bg-gray-50'}>
+                /* TABLA DE GASTOS OPERATIVOS */
+                expenses.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    No hay gastos registrados aún. Usa la pestaña "- Registrar Gasto / Salario" para registrar sueldos, pasajes o servicios.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                          <th className="p-3">Fecha</th>
+                          <th className="p-3">Categoría</th>
+                          <th className="p-3">Concepto / Detalle</th>
+                          <th className="p-3">Método</th>
+                          <th className="p-3">Monto</th>
+                          <th className="p-3 text-center">Eliminar</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y text-sm text-gray-700">
+                        {expenses.map(exp => (
+                          <tr key={exp.id} className="hover:bg-red-50/40">
+                            <td className="p-3 text-xs text-gray-500">
+                              {new Date(exp.created_at).toLocaleDateString()}
+                            </td>
                             <td className="p-3">
-                              <p className="font-medium text-gray-900">
-                                {sale.quantity > 1 ? `${sale.quantity}x ` : ''}{cleanProductName(sale.product_name)}
-                              </p>
-                              {sn && (
-                                <p className="text-[11px] font-mono text-blue-700">S/N: {sn}</p>
-                              )}
-                              <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
-                                hasDebt
-                                  ? 'bg-amber-100 text-amber-800'
-                                  : 'bg-green-100 text-green-800'
-                              }`}>
-                                {hasDebt ? 'Crédito Pendiente' : 'Pagado'}
+                              <span className="inline-block bg-red-100 text-red-800 text-[11px] font-semibold px-2 py-0.5 rounded">
+                                {exp.category}
                               </span>
                             </td>
-                            <td className="p-3 font-medium">{sale.customer}</td>
-                            <td className="p-3 font-semibold">{cur} {Number(sale.total_amount).toFixed(2)}</td>
-                            <td className="p-3 text-green-700 font-semibold">{cur} {paid.toFixed(2)}</td>
                             <td className="p-3">
-                              {hasDebt ? (
-                                <span className="font-bold text-red-600">{cur} {pending.toFixed(2)}</span>
-                              ) : (
-                                <span className="text-xs text-gray-400">{cur} 0.00</span>
-                              )}
+                              <p className="font-medium text-gray-900">{exp.description}</p>
+                              {exp.notes && <p className="text-xs text-gray-500">{exp.notes}</p>}
                             </td>
-                            <td className="p-3 text-gray-500 text-xs">
-                              {new Date(sale.created_at).toLocaleDateString()}
+                            <td className="p-3 text-xs">{exp.payment_method}</td>
+                            <td className="p-3 font-bold text-red-600">
+                              - {cur} {Number(exp.amount).toFixed(2)}
                             </td>
-                            <td className="p-3">
-                              <div className="flex items-center justify-center gap-1.5">
-                                {hasDebt && (
-                                  <button
-                                    onClick={() => openInstallmentModal(sale)}
-                                    className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded text-xs font-semibold transition"
-                                  >
-                                    + Abonar
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => handleOpenHistoryReceipt(sale)}
-                                  className="bg-gray-800 text-white px-2.5 py-1 rounded text-xs hover:bg-gray-900 transition"
-                                >
-                                  Nota
-                                </button>
-                              </div>
+                            <td className="p-3 text-center">
+                              <button
+                                onClick={() => handleDeleteExpense(exp)}
+                                className="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded text-xs font-bold"
+                                title="Eliminar gasto"
+                              >
+                                ✕
+                              </button>
                             </td>
                           </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
               )}
             </div>
           </div>
@@ -1040,14 +1310,13 @@ export default function Cashbox() {
         </div>
       )}
 
-      {/* Modal de Nota de Venta / Recibo Consolidado Imprimible con Columna Serie */}
+      {/* Modal de Nota de Venta / Recibo Consolidado Imprimible */}
       {selectedReceiptGroup && selectedReceiptGroup.length > 0 && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div
             id="printable-receipt"
             className="bg-white rounded-lg shadow-xl max-w-xl w-full p-6 border border-gray-200 my-4"
           >
-            {/* Encabezado Dinámico con Logo y Datos de Configuración */}
             <div className="flex justify-between items-start border-b-2 border-gray-800 pb-3 mb-3 gap-3">
               <div className="flex items-start gap-3">
                 {settings.logo_url && (
@@ -1085,7 +1354,6 @@ export default function Cashbox() {
               </div>
             </div>
 
-            {/* Datos del Cliente y Pago */}
             <div className="grid grid-cols-2 gap-4 bg-gray-50 p-2.5 rounded text-xs mb-3 border border-gray-200">
               <div>
                 <p className="text-gray-500 uppercase font-semibold">Cliente:</p>
@@ -1099,7 +1367,6 @@ export default function Cashbox() {
               </div>
             </div>
 
-            {/* Tabla Consolidada de Equipos, Series y Servicios */}
             <table className="w-full text-left border-collapse mb-3 text-sm">
               <thead>
                 <tr className="border-b border-gray-300 text-xs uppercase text-gray-600">
@@ -1130,7 +1397,6 @@ export default function Cashbox() {
               </tbody>
             </table>
 
-            {/* Totales, Abonos y Saldo Pendiente */}
             <div className="border-t-2 border-gray-800 pt-2 mb-3 space-y-1 text-right">
               <div>
                 <span className="text-xs uppercase text-gray-600 font-semibold mr-3">Total Nota de Venta:</span>
@@ -1152,7 +1418,6 @@ export default function Cashbox() {
               )}
             </div>
 
-            {/* Sección de Pago por QR Bancario desde Configuración */}
             <div className="flex items-center gap-4 bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
               <div className="bg-white p-1.5 rounded border border-gray-300 shrink-0">
                 {settings.qr_image_url ? (
@@ -1190,7 +1455,6 @@ export default function Cashbox() {
               </div>
             </div>
 
-            {/* Cláusula de Garantía */}
             <div className="mb-4">
               <p className="text-xs font-semibold text-gray-700 uppercase mb-1">Condiciones de Garantía / Observaciones:</p>
               <textarea
@@ -1201,13 +1465,11 @@ export default function Cashbox() {
               />
             </div>
 
-            {/* Firmas */}
             <div className="grid grid-cols-2 gap-8 pt-4 text-center text-xs text-gray-600">
               <div className="border-t border-gray-400 pt-1">Entregado por ({settings.company_name})</div>
               <div className="border-t border-gray-400 pt-1">Recibí Conforme (Cliente)</div>
             </div>
 
-            {/* Botones de Acción */}
             <div className="mt-4 flex justify-end gap-3 no-print border-t pt-3">
               <button
                 onClick={() => setSelectedReceiptGroup(null)}

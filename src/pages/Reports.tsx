@@ -41,6 +41,16 @@ interface PurchaseRecord {
   created_at: string
 }
 
+interface ExpenseRecord {
+  id: string
+  description: string
+  category: string
+  amount: number
+  payment_method: string
+  notes?: string
+  created_at: string
+}
+
 interface KardexMovement {
   id: string
   date: string
@@ -59,6 +69,7 @@ export default function Reports() {
   const navigate = useNavigate()
   const [sales, setSales] = useState<SaleRecord[]>([])
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
+  const [expenses, setExpenses] = useState<ExpenseRecord[]>([])
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([])
   const [inventoryValue, setInventoryValue] = useState(0)
   const [initialCapital, setInitialCapital] = useState(0)
@@ -68,7 +79,7 @@ export default function Reports() {
   const [loading, setLoading] = useState(true)
 
   // Pestaña activa de reportes
-  const [reportTab, setReportTab] = useState<'sales' | 'purchases' | 'stock' | 'kardex'>('sales')
+  const [reportTab, setReportTab] = useState<'sales' | 'purchases' | 'expenses' | 'stock' | 'kardex'>('sales')
 
   // Filtros globales por fecha e ítem específico
   const [dateFrom, setDateFrom] = useState('')
@@ -83,15 +94,17 @@ export default function Reports() {
 
   const fetchFinancialData = async () => {
     setLoading(true)
-    const [salesRes, invRes, settingsRes, purchasesRes] = await Promise.all([
+    const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
       supabase.from('sales').select('*').order('created_at', { ascending: false }),
       supabase.from('inventory').select('*').order('name', { ascending: true }),
       supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital').eq('id', 1).single(),
-      supabase.from('purchases').select('*').order('created_at', { ascending: false })
+      supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+      supabase.from('expenses').select('*').order('created_at', { ascending: false })
     ])
 
     if (salesRes.data) setSales(salesRes.data)
     if (!purchasesRes.error && purchasesRes.data) setPurchases(purchasesRes.data)
+    if (!expensesRes.error && expensesRes.data) setExpenses(expensesRes.data)
     if (settingsRes.data) {
       if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
       if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
@@ -203,14 +216,17 @@ export default function Reports() {
     return true
   })
 
-  // 3. Stock de ítems específicos
+  // 3. Gastos filtrados por fecha
+  const filteredExpenses = expenses.filter(exp => matchesDateRange(exp.created_at))
+
+  // 4. Stock de ítems específicos
   const filteredStockItems = inventoryItems.filter(item => {
     if (selectedCategoryFilter !== 'Todas' && item.category !== selectedCategoryFilter) return false
     if (selectedItemFilter && item.name.toLowerCase() !== selectedItemFilter.toLowerCase()) return false
     return true
   })
 
-  // 4. Kardex cronológico
+  // 5. Kardex cronológico
   const buildKardexMovements = (): KardexMovement[] => {
     const rawMovements: KardexMovement[] = []
 
@@ -269,19 +285,26 @@ export default function Reports() {
 
   const kardexMovements = buildKardexMovements()
 
-  // Métricas financieras: solo compras pagadas restan del capital
+  // Métricas financieras
   const totalRevenue = filteredSales.reduce((acc, s) => acc + Number(s.total_amount), 0)
   const totalCollected = filteredSales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
   const totalReceivable = filteredSales.reduce((acc, s) => acc + getSalePendingBalance(s), 0)
   const totalSoldCost = filteredSales.reduce((acc, s) => acc + (Number(s.unit_cost) * Number(s.quantity)), 0)
-  const netProfit = totalRevenue - totalSoldCost
+  const grossSalesProfit = totalRevenue - totalSoldCost
+
+  const totalExpensesPeriod = filteredExpenses.reduce((acc, e) => acc + Number(e.amount || 0), 0)
+  const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e.amount || 0), 0)
+  const netRealProfit = grossSalesProfit - totalExpensesPeriod
 
   const totalPurchasesPaidPeriod = filteredPurchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
   const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
   const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
 
   const remainingInitialCapital = initialCapital - totalPurchasesPaidAll
-  const totalCashOnHand = remainingInitialCapital + sales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
+  const totalCashOnHand =
+    remainingInitialCapital +
+    sales.reduce((acc, s) => acc + getSalePaidAmount(s), 0) -
+    totalExpensesAll
 
   const clearFilters = () => {
     setStatusFilter('all')
@@ -331,7 +354,7 @@ export default function Reports() {
                 Panel Gerencial, Kardex y Reportes — {companyName}
               </h1>
               <p className="text-sm text-gray-500">
-                Consultas por fecha de compras (contado y crédito), ventas, stock específico y Kardex
+                Control de capital, compras, gastos operativos (salarios/pasajes), ventas y utilidad real
               </p>
             </div>
           </div>
@@ -357,7 +380,7 @@ export default function Reports() {
           </div>
         </div>
 
-        {/* Estado del Capital, Compras Pagadas y Cuentas por Pagar */}
+        {/* Estado del Capital, Compras Pagadas, Cuentas por Pagar y Liquidez Real */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-gray-800">
             <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial</p>
@@ -372,9 +395,9 @@ export default function Reports() {
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-orange-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Pagar (Créditos)</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Pagar</p>
             <p className="text-xl font-bold text-orange-600 mt-1">{currency} {totalPurchasesPayableAll.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Deuda a proveedores sin descontar</p>
+            <p className="text-[11px] text-gray-400 mt-1">Deuda a proveedores pendiente</p>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-amber-500">
@@ -386,11 +409,11 @@ export default function Reports() {
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-emerald-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Liquidez Total en Caja</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Liquidez Real en Caja</p>
             <p className={`text-xl font-bold mt-1 ${totalCashOnHand >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
               {currency} {totalCashOnHand.toFixed(2)}
             </p>
-            <p className="text-[11px] text-gray-400 mt-1">Saldo capital + ventas cobradas</p>
+            <p className="text-[11px] text-gray-400 mt-1">Capital + cobros - gastos</p>
           </div>
         </div>
 
@@ -471,31 +494,38 @@ export default function Reports() {
           </div>
         </div>
 
-        {/* Tarjetas Resumen de Ventas y Stock */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+        {/* Tarjetas Resumen de Ventas, Gastos y Utilidad Real */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4 mb-6">
           <div className="bg-white p-4 rounded-lg shadow border-t-4 border-emerald-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Ventas Cobradas</p>
-            <p className="text-xl font-bold text-emerald-700 mt-1">{currency} {totalCollected.toFixed(2)}</p>
+            <p className="text-lg font-bold text-emerald-700 mt-1">{currency} {totalCollected.toFixed(2)}</p>
           </div>
 
           <div className="bg-white p-4 rounded-lg shadow border-t-4 border-amber-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Por Cobrar (Clientes)</p>
-            <p className="text-xl font-bold text-amber-600 mt-1">{currency} {totalReceivable.toFixed(2)}</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Por Cobrar</p>
+            <p className="text-lg font-bold text-amber-600 mt-1">{currency} {totalReceivable.toFixed(2)}</p>
           </div>
 
           <div className="bg-white p-4 rounded-lg shadow border-t-4 border-blue-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Facturación Período</p>
-            <p className="text-xl font-bold text-gray-800 mt-1">{currency} {totalRevenue.toFixed(2)}</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Margen Bruto Ventas</p>
+            <p className="text-lg font-bold text-blue-700 mt-1">{currency} {grossSalesProfit.toFixed(2)}</p>
           </div>
 
-          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-green-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Utilidad Neta Período</p>
-            <p className="text-xl font-bold text-green-700 mt-1">{currency} {netProfit.toFixed(2)}</p>
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-red-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Gastos / Salarios</p>
+            <p className="text-lg font-bold text-red-600 mt-1">- {currency} {totalExpensesPeriod.toFixed(2)}</p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow border-t-4 border-green-700">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Utilidad Neta Real</p>
+            <p className={`text-lg font-bold mt-1 ${netRealProfit >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+              {currency} {netRealProfit.toFixed(2)}
+            </p>
           </div>
 
           <div className="bg-white p-4 rounded-lg shadow border-t-4 border-purple-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Valor Stock Actual</p>
-            <p className="text-xl font-bold text-purple-700 mt-1">{currency} {inventoryValue.toFixed(2)}</p>
+            <p className="text-lg font-bold text-purple-700 mt-1">{currency} {inventoryValue.toFixed(2)}</p>
           </div>
         </div>
 
@@ -513,10 +543,18 @@ export default function Reports() {
             <button
               onClick={() => setReportTab('purchases')}
               className={`px-4 py-2 rounded-lg text-sm font-bold transition ${
-                reportTab === 'purchases' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                reportTab === 'purchases' ? 'bg-orange-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
               Reporte de Compras ({filteredPurchases.length})
+            </button>
+            <button
+              onClick={() => setReportTab('expenses')}
+              className={`px-4 py-2 rounded-lg text-sm font-bold transition ${
+                reportTab === 'expenses' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              Gastos y Salarios ({filteredExpenses.length})
             </button>
             <button
               onClick={() => setReportTab('stock')}
@@ -524,7 +562,7 @@ export default function Reports() {
                 reportTab === 'stock' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
-              Stock de Ítems Específicos ({filteredStockItems.length})
+              Stock por Ítem ({filteredStockItems.length})
             </button>
             <button
               onClick={() => setReportTab('kardex')}
@@ -532,7 +570,7 @@ export default function Reports() {
                 reportTab === 'kardex' ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
-              Kardex por Fecha e Ítem ({kardexMovements.length})
+              Kardex por Fecha ({kardexMovements.length})
             </button>
           </div>
 
@@ -558,7 +596,7 @@ export default function Reports() {
                         <th className="p-3">Total</th>
                         <th className="p-3">Cobrado</th>
                         <th className="p-3">Saldo</th>
-                        <th className="p-3">Utilidad</th>
+                        <th className="p-3">Margen</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y text-sm text-gray-700">
@@ -653,6 +691,50 @@ export default function Reports() {
                           </tr>
                         )
                       })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : reportTab === 'expenses' ? (
+            <div>
+              <h2 className="text-lg font-bold text-gray-800 mb-3">
+                Reporte de Gastos Operativos, Salarios y Pasajes {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
+              </h2>
+              {filteredExpenses.length === 0 ? (
+                <p className="text-sm text-gray-500">No hay gastos registrados en el rango de fechas seleccionado.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
+                        <th className="p-3">Fecha</th>
+                        <th className="p-3">Categoría</th>
+                        <th className="p-3">Descripción</th>
+                        <th className="p-3">Observación / Beneficiario</th>
+                        <th className="p-3">Método</th>
+                        <th className="p-3">Monto</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-sm text-gray-700">
+                      {filteredExpenses.map(exp => (
+                        <tr key={exp.id} className="hover:bg-red-50/30">
+                          <td className="p-3 text-xs text-gray-500">
+                            {new Date(exp.created_at).toLocaleDateString()}
+                          </td>
+                          <td className="p-3">
+                            <span className="inline-block bg-red-100 text-red-800 text-xs font-semibold px-2 py-0.5 rounded">
+                              {exp.category}
+                            </span>
+                          </td>
+                          <td className="p-3 font-medium text-gray-900">{exp.description}</td>
+                          <td className="p-3 text-xs text-gray-600">{exp.notes || '—'}</td>
+                          <td className="p-3 text-xs">{exp.payment_method}</td>
+                          <td className="p-3 font-bold text-red-600">
+                            - {currency} {Number(exp.amount).toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
