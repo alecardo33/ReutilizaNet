@@ -47,6 +47,14 @@ export default function Inventory() {
   const [existingItemId, setExistingItemId] = useState('')
   const [name, setName] = useState('')
   const [category, setCategory] = useState('Laptops')
+  const [categories, setCategories] = useState<string[]>([
+    'Laptops',
+    'PCs de Escritorio',
+    'Tablets',
+    'Monitores',
+    'Componentes',
+    'Periféricos'
+  ])
   const [condition, setCondition] = useState('Reacondicionado - Grado A')
   const [supplier, setSupplier] = useState('')
   const [cost, setCost] = useState('')
@@ -192,6 +200,19 @@ export default function Inventory() {
     }
 
     setLoading(false)
+  }
+
+  const handleAddCategory = () => {
+    const newCat = prompt('Ingrese el nombre de la nueva categoría:')
+    if (newCat && newCat.trim()) {
+      const formatted = newCat.trim()
+      if (!categories.includes(formatted)) {
+        setCategories([...categories, formatted])
+        setCategory(formatted)
+      } else {
+        alert('Esa categoría ya existe.')
+      }
+    }
   }
 
   const handleSelectExistingForRestock = (itemId: string) => {
@@ -821,18 +842,25 @@ export default function Inventory() {
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Categoría</label>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-xs font-semibold text-gray-700">Categoría</label>
+                        <button
+                          type="button"
+                          onClick={handleAddCategory}
+                          title="Crear nueva categoría"
+                          className="text-[10px] text-blue-600 hover:text-blue-800 font-bold bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded transition"
+                        >
+                          + Nueva
+                        </button>
+                      </div>
                       <select
                         value={category}
                         onChange={e => setCategory(e.target.value)}
                         className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
                       >
-                        <option value="Laptops">Laptops</option>
-                        <option value="PCs de Escritorio">PCs de Escritorio</option>
-                        <option value="Tablets">Tablets</option>
-                        <option value="Monitores">Monitores</option>
-                        <option value="Componentes">Componentes (RAM, SSD)</option>
-                        <option value="Periféricos">Periféricos y Accesorios</option>
+                        {categories.map(cat => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
                       </select>
                     </div>
                     <div>
@@ -1058,12 +1086,9 @@ export default function Inventory() {
                     className="border border-gray-300 p-2 rounded text-xs bg-white"
                   >
                     <option value="Todas">Todas las categorías</option>
-                    <option value="Laptops">Laptops</option>
-                    <option value="PCs de Escritorio">PCs de Escritorio</option>
-                        <option value="Tablets">Tablets</option>
-                    <option value="Monitores">Monitores</option>
-                    <option value="Componentes">Componentes</option>
-                    <option value="Periféricos">Periféricos</option>
+                    {categories.map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
                   </select>
                   <select
                     value={filterCondition}
@@ -1328,12 +1353,9 @@ export default function Inventory() {
                     onChange={e => setEditCategory(e.target.value)}
                     className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
                   >
-                    <option value="Laptops">Laptops</option>
-                    <option value="PCs de Escritorio">PCs de Escritorio</option>
-                        <option value="Tablets">Tablets</option>
-                    <option value="Monitores">Monitores</option>
-                    <option value="Componentes">Componentes (RAM, SSD, Discos)</option>
-                    <option value="Periféricos">Periféricos y Accesorios</option>
+                    {categories.map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
