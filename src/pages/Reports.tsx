@@ -36,6 +36,8 @@ interface PurchaseRecord {
   quantity: number
   unit_cost: number
   total_cost: number
+  amount_paid?: number
+  payment_status?: string
   created_at: string
 }
 
@@ -117,6 +119,29 @@ export default function Reports() {
     return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim()
   }
 
+  const cleanSupplierName = (supplierStr?: string): string => {
+    if (!supplierStr) return 'Proveedor General'
+    return supplierStr.replace(/\s*\[Crédito[^\]]*\]/i, '').trim() || 'Proveedor General'
+  }
+
+  const getPurchasePaidAmount = (p: PurchaseRecord): number => {
+    if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
+      return Number(p.amount_paid)
+    }
+    const match = p.supplier?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    if (match) return Number(match[1])
+    if (p.payment_status === 'Pendiente' || p.supplier?.toLowerCase().includes('[crédito')) {
+      return 0
+    }
+    return Number(p.total_cost) || 0
+  }
+
+  const getPurchasePendingDebt = (p: PurchaseRecord): number => {
+    const total = Number(p.total_cost) || 0
+    const paid = getPurchasePaidAmount(p)
+    return Math.max(0, Number((total - paid).toFixed(2)))
+  }
+
   const getSalePaidAmount = (sale: SaleRecord): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
@@ -153,7 +178,7 @@ export default function Reports() {
     return cleanProductName(rawName).toLowerCase() === selectedItemFilter.toLowerCase()
   }
 
-  // 1. Ventas filtradas por fecha, estado e ítem específico
+  // 1. Ventas filtradas
   const filteredSales = sales.filter(sale => {
     const pending = getSalePendingBalance(sale)
     const isPending = pending > 0.009
@@ -165,34 +190,40 @@ export default function Reports() {
     return true
   })
 
-  // 2. Compras filtradas por fecha, categoría e ítem específico
+  // 2. Compras filtradas
   const filteredPurchases = purchases.filter(p => {
+    const debt = getPurchasePendingDebt(p)
+    const isPending = debt > 0.009
+
+    if (statusFilter === 'pending' && !isPending) return false
+    if (statusFilter === 'paid' && isPending) return false
     if (!matchesDateRange(p.created_at)) return false
     if (selectedCategoryFilter !== 'Todas' && p.category !== selectedCategoryFilter) return false
     if (!matchesItemName(p.item_name)) return false
     return true
   })
 
-  // 3. Stock de ítems específicos (con entradas, salidas y saldo en el rango de fechas)
+  // 3. Stock de ítems específicos
   const filteredStockItems = inventoryItems.filter(item => {
     if (selectedCategoryFilter !== 'Todas' && item.category !== selectedCategoryFilter) return false
     if (selectedItemFilter && item.name.toLowerCase() !== selectedItemFilter.toLowerCase()) return false
     return true
   })
 
-  // 4. Construcción del Kardex cronológico por fecha e ítem
+  // 4. Kardex cronológico
   const buildKardexMovements = (): KardexMovement[] => {
     const rawMovements: KardexMovement[] = []
 
     purchases.forEach(p => {
       if (selectedCategoryFilter !== 'Todas' && p.category !== selectedCategoryFilter) return
       if (!matchesItemName(p.item_name)) return
+      const debt = getPurchasePendingDebt(p)
       rawMovements.push({
         id: `pur-${p.id}`,
         date: p.created_at,
         type: 'ENTRADA (Compra)',
         item_name: p.item_name,
-        reference: `Proveedor: ${p.supplier || 'General'}`,
+        reference: `Proveedor: ${cleanSupplierName(p.supplier)}${debt > 0 ? ' (A Crédito)' : ''}`,
         in_qty: Number(p.quantity),
         out_qty: 0,
         unit_cost: Number(p.unit_cost),
@@ -219,7 +250,6 @@ export default function Reports() {
       })
     })
 
-    // Ordenar cronológicamente ascendente para calcular saldo acumulado por producto
     rawMovements.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 
     const balancesByProduct: Record<string, number> = {}
@@ -234,21 +264,23 @@ export default function Reports() {
       }
     })
 
-    // Aplicar filtro de rango de fechas manteniendo el saldo real acumulado
     return withBalances.filter(mov => matchesDateRange(mov.date)).reverse()
   }
 
   const kardexMovements = buildKardexMovements()
 
-  // Métricas sobre los datos filtrados
+  // Métricas financieras: solo compras pagadas restan del capital
   const totalRevenue = filteredSales.reduce((acc, s) => acc + Number(s.total_amount), 0)
   const totalCollected = filteredSales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
   const totalReceivable = filteredSales.reduce((acc, s) => acc + getSalePendingBalance(s), 0)
   const totalSoldCost = filteredSales.reduce((acc, s) => acc + (Number(s.unit_cost) * Number(s.quantity)), 0)
   const netProfit = totalRevenue - totalSoldCost
 
-  const totalPurchasesCostPeriod = filteredPurchases.reduce((acc, p) => acc + Number(p.total_cost), 0)
-  const remainingInitialCapital = initialCapital - purchases.reduce((acc, p) => acc + Number(p.total_cost), 0)
+  const totalPurchasesPaidPeriod = filteredPurchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
+  const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
+  const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
+
+  const remainingInitialCapital = initialCapital - totalPurchasesPaidAll
   const totalCashOnHand = remainingInitialCapital + sales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
 
   const clearFilters = () => {
@@ -266,7 +298,6 @@ export default function Reports() {
     selectedItemFilter !== '' ||
     selectedCategoryFilter !== 'Todas'
 
-  // Lista única de nombres de ítems para el selector de filtro
   const uniqueProductNames = Array.from(
     new Set([
       ...inventoryItems.map(i => i.name),
@@ -300,7 +331,7 @@ export default function Reports() {
                 Panel Gerencial, Kardex y Reportes — {companyName}
               </h1>
               <p className="text-sm text-gray-500">
-                Consultas por fecha de compras, ventas, stock por ítem específico y Kardex físico-valorado
+                Consultas por fecha de compras (contado y crédito), ventas, stock específico y Kardex
               </p>
             </div>
           </div>
@@ -326,31 +357,37 @@ export default function Reports() {
           </div>
         </div>
 
-        {/* Estado del Capital del Negocio */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {/* Estado del Capital, Compras Pagadas y Cuentas por Pagar */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-gray-800">
             <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial</p>
-            <p className="text-2xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
+            <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
             <p className="text-[11px] text-gray-400 mt-1">Fondo base en Configuración</p>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-red-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Compras en Período Filtrado</p>
-            <p className="text-2xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesCostPeriod.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-1">{filteredPurchases.length} compra(s) en rango</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Compras Pagadas (Período)</p>
+            <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesPaidPeriod.toFixed(2)}</p>
+            <p className="text-[11px] text-gray-400 mt-1">Efectivamente salido de capital</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-orange-500">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Cuentas por Pagar (Créditos)</p>
+            <p className="text-xl font-bold text-orange-600 mt-1">{currency} {totalPurchasesPayableAll.toFixed(2)}</p>
+            <p className="text-[11px] text-gray-400 mt-1">Deuda a proveedores sin descontar</p>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-amber-500">
             <p className="text-xs text-gray-500 uppercase font-semibold">Saldo Remanente Capital</p>
-            <p className={`text-2xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
+            <p className={`text-xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
               {currency} {remainingInitialCapital.toFixed(2)}
             </p>
-            <p className="text-[11px] text-gray-400 mt-1">Capital inicial menos compras totales</p>
+            <p className="text-[11px] text-gray-400 mt-1">Capital menos compras pagadas</p>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-emerald-600">
             <p className="text-xs text-gray-500 uppercase font-semibold">Liquidez Total en Caja</p>
-            <p className={`text-2xl font-bold mt-1 ${totalCashOnHand >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+            <p className={`text-xl font-bold mt-1 ${totalCashOnHand >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
               {currency} {totalCashOnHand.toFixed(2)}
             </p>
             <p className="text-[11px] text-gray-400 mt-1">Saldo capital + ventas cobradas</p>
@@ -410,13 +447,13 @@ export default function Reports() {
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1">Estado de Cobro (Ventas)</label>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Estado (Pagado / Crédito)</label>
                 <select
                   value={statusFilter}
                   onChange={e => setStatusFilter(e.target.value as 'all' | 'paid' | 'pending')}
                   className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm bg-white"
                 >
-                  <option value="all">Todas las ventas</option>
+                  <option value="all">Todas las operaciones</option>
                   <option value="paid">Solo Pagadas</option>
                   <option value="pending">Solo Créditos Pendientes</option>
                 </select>
@@ -442,7 +479,7 @@ export default function Reports() {
           </div>
 
           <div className="bg-white p-4 rounded-lg shadow border-t-4 border-amber-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Por Cobrar (Créditos)</p>
+            <p className="text-xs text-gray-500 uppercase font-semibold">Por Cobrar (Clientes)</p>
             <p className="text-xl font-bold text-amber-600 mt-1">{currency} {totalReceivable.toFixed(2)}</p>
           </div>
 
@@ -502,7 +539,6 @@ export default function Reports() {
           {loading ? (
             <p className="text-sm text-gray-500">Cargando información de reportes...</p>
           ) : reportTab === 'sales' ? (
-            /* TAB 1: REPORTE DE VENTAS POR FECHA */
             <div>
               <h2 className="text-lg font-bold text-gray-800 mb-3">
                 Reporte de Ventas {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
@@ -565,10 +601,9 @@ export default function Reports() {
               )}
             </div>
           ) : reportTab === 'purchases' ? (
-            /* TAB 2: REPORTE DE COMPRAS POR FECHA */
             <div>
               <h2 className="text-lg font-bold text-gray-800 mb-3">
-                Reporte de Compras de Equipos y Periféricos {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
+                Reporte de Compras (Contado y Crédito) {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
               </h2>
               {filteredPurchases.length === 0 ? (
                 <p className="text-sm text-gray-500">No hay compras registradas en el rango de fechas seleccionado.</p>
@@ -579,36 +614,51 @@ export default function Reports() {
                       <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
                         <th className="p-3">Fecha</th>
                         <th className="p-3">Equipo / Periférico</th>
-                        <th className="p-3">Categoría</th>
                         <th className="p-3">Proveedor</th>
                         <th className="p-3 text-center">Cant.</th>
-                        <th className="p-3">Costo Unit.</th>
-                        <th className="p-3">Total Invertido</th>
+                        <th className="p-3">Total Compra</th>
+                        <th className="p-3">Pagado Capital</th>
+                        <th className="p-3">Saldo Deuda</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y text-sm text-gray-700">
-                      {filteredPurchases.map(p => (
-                        <tr key={p.id} className="hover:bg-gray-50">
-                          <td className="p-3 text-xs text-gray-500">
-                            {new Date(p.created_at).toLocaleDateString()}
-                          </td>
-                          <td className="p-3 font-medium text-gray-900">{p.item_name}</td>
-                          <td className="p-3 text-xs">{p.category}</td>
-                          <td className="p-3 text-xs">{p.supplier || 'Proveedor General'}</td>
-                          <td className="p-3 text-center font-semibold">{p.quantity}</td>
-                          <td className="p-3">{currency} {Number(p.unit_cost).toFixed(2)}</td>
-                          <td className="p-3 font-bold text-red-600">
-                            - {currency} {Number(p.total_cost).toFixed(2)}
-                          </td>
-                        </tr>
-                      ))}
+                      {filteredPurchases.map(p => {
+                        const paid = getPurchasePaidAmount(p)
+                        const debt = getPurchasePendingDebt(p)
+                        const hasDebt = debt > 0.009
+                        return (
+                          <tr key={p.id} className={hasDebt ? 'bg-orange-50/40' : 'hover:bg-gray-50'}>
+                            <td className="p-3 text-xs text-gray-500">
+                              {new Date(p.created_at).toLocaleDateString()}
+                            </td>
+                            <td className="p-3">
+                              <p className="font-medium text-gray-900">{p.item_name}</p>
+                              <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
+                                hasDebt ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
+                              }`}>
+                                {hasDebt ? 'Crédito Pendiente' : 'Pagado'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-xs">{cleanSupplierName(p.supplier)}</td>
+                            <td className="p-3 text-center font-semibold">{p.quantity}</td>
+                            <td className="p-3 font-semibold">{currency} {Number(p.total_cost).toFixed(2)}</td>
+                            <td className="p-3 text-red-600 font-semibold">- {currency} {paid.toFixed(2)}</td>
+                            <td className="p-3">
+                              {hasDebt ? (
+                                <span className="font-bold text-orange-700">{currency} {debt.toFixed(2)}</span>
+                              ) : (
+                                <span className="text-xs text-gray-400">{currency} 0.00</span>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
               )}
             </div>
           ) : reportTab === 'stock' ? (
-            /* TAB 3: STOCK DE ÍTEMS ESPECÍFICOS CON MOVIMIENTO EN FECHAS */
             <div>
               <h2 className="text-lg font-bold text-gray-800 mb-3">
                 Reporte de Stock por Ítem Específico {dateFrom || dateTo ? `(Movimientos del ${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
@@ -665,7 +715,6 @@ export default function Reports() {
               )}
             </div>
           ) : (
-            /* TAB 4: KARDEX CRONOLÓGICO POR FECHA E ÍTEM */
             <div>
               <div className="flex flex-wrap justify-between items-center mb-3 gap-2">
                 <h2 className="text-lg font-bold text-gray-800">

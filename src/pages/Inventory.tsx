@@ -21,6 +21,8 @@ interface PurchaseRecord {
   quantity: number
   unit_cost: number
   total_cost: number
+  amount_paid?: number
+  payment_status?: string
   created_at: string
 }
 
@@ -37,6 +39,7 @@ export default function Inventory() {
 
   // Pestaña activa en la vista derecha: 'stock' o 'purchases'
   const [activeTab, setActiveTab] = useState<'stock' | 'purchases'>('stock')
+  const [purchaseFilter, setPurchaseFilter] = useState<'all' | 'pending'>('all')
 
   // Formulario de Compra / Ingreso de Equipo o Periférico
   const [purchaseMode, setPurchaseMode] = useState<'new' | 'existing'>('new')
@@ -48,7 +51,16 @@ export default function Inventory() {
   const [cost, setCost] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('1')
-  const [deductFromCapital, setDeductFromCapital] = useState(true)
+
+  // Modalidad de pago de compra: 'cash' (Descuenta capital), 'credit' (A crédito - Cuentas por Pagar), 'none' (Ingreso sin afectación)
+  const [purchasePaymentType, setPurchasePaymentType] = useState<'cash' | 'credit' | 'none'>('cash')
+  const [initialSupplierDeposit, setInitialSupplierDeposit] = useState('')
+
+  // Modal para abonar / pagar compras a crédito (Cuentas por Pagar)
+  const [paySupplierModalOpen, setPaySupplierModalOpen] = useState(false)
+  const [targetCreditPurchase, setTargetCreditPurchase] = useState<PurchaseRecord | null>(null)
+  const [supplierInstallmentAmount, setSupplierInstallmentAmount] = useState('')
+  const [savingSupplierPayment, setSavingSupplierPayment] = useState(false)
 
   // Filtros y búsqueda de inventario
   const [searchTerm, setSearchTerm] = useState('')
@@ -81,6 +93,30 @@ export default function Inventory() {
   }, [])
 
   const isAdmin = userRole === 'admin'
+
+  // Helpers para interpretar pagos y saldos de compras a crédito
+  const getPurchasePaidAmount = (p: PurchaseRecord): number => {
+    if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
+      return Number(p.amount_paid)
+    }
+    const match = p.supplier?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    if (match) return Number(match[1])
+    if (p.payment_status === 'Pendiente' || p.supplier?.toLowerCase().includes('[crédito')) {
+      return 0
+    }
+    return Number(p.total_cost) || 0
+  }
+
+  const getPurchasePendingDebt = (p: PurchaseRecord): number => {
+    const total = Number(p.total_cost) || 0
+    const paid = getPurchasePaidAmount(p)
+    return Math.max(0, Number((total - paid).toFixed(2)))
+  }
+
+  const cleanSupplierName = (supplierStr?: string): string => {
+    if (!supplierStr) return 'Proveedor General'
+    return supplierStr.replace(/\s*\[Crédito[^\]]*\]/i, '').trim() || 'Proveedor General'
+  }
 
   const getSalePaidAmount = (sale: any): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
@@ -128,7 +164,6 @@ export default function Inventory() {
       }
     }
 
-    // Solo cargar compras y ventas cobradas si es administrador
     if (adminCheck) {
       const [purchasesRes, salesRes] = await Promise.all([
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
@@ -168,6 +203,18 @@ export default function Inventory() {
     if (purchaseMode === 'new' && !name.trim()) return
     if (purchaseMode === 'existing' && !existingItemId) {
       alert('Selecciona un equipo o periférico existente para reabastecer.')
+      return
+    }
+
+    const isCreditPurchase = isAdmin && purchasePaymentType === 'credit'
+    const depositNum = isCreditPurchase
+      ? Math.max(0, Number(initialSupplierDeposit) || 0)
+      : purchasePaymentType === 'cash'
+      ? totalPurchaseCost
+      : 0
+
+    if (isCreditPurchase && depositNum > totalPurchaseCost) {
+      alert(`El adelanto (${depositNum.toFixed(2)}) no puede ser mayor al total de la compra (${totalPurchaseCost.toFixed(2)}).`)
       return
     }
 
@@ -215,25 +262,38 @@ export default function Inventory() {
         if (updErr) throw updErr
       }
 
-      // Registrar movimiento de compra solo si es admin y marcó descontar de capital
-      if (isAdmin && deductFromCapital && totalPurchaseCost > 0) {
-        const { error: purErr } = await supabase.from('purchases').insert([
-          {
-            item_name: recordedItemName,
-            category: recordedCategory,
-            supplier: supplier.trim() || 'Proveedor General',
-            quantity: qtyNum,
-            unit_cost: unitCostNum,
-            total_cost: totalPurchaseCost,
-            created_by: user?.id
-          }
-        ])
+      // Registrar en historial de compras si es contado o crédito (si es 'none' no afecta capital ni deudas)
+      if (isAdmin && purchasePaymentType !== 'none' && totalPurchaseCost > 0) {
+        const pendingDebt = Number((totalPurchaseCost - depositNum).toFixed(2))
+        const baseSupplier = supplier.trim() || 'Proveedor General'
+        const encodedSupplier = isCreditPurchase
+          ? `${baseSupplier} [Crédito - Pagado: ${depositNum.toFixed(2)} | Saldo: ${pendingDebt.toFixed(2)}]`
+          : baseSupplier
 
-        if (purErr) {
-          alert(
-            'El equipo se agregó al inventario, pero hubo un problema al registrar en purchases: ' +
-              purErr.message
-          )
+        const extendedPayload = {
+          item_name: recordedItemName,
+          category: recordedCategory,
+          supplier: encodedSupplier,
+          quantity: qtyNum,
+          unit_cost: unitCostNum,
+          total_cost: totalPurchaseCost,
+          amount_paid: depositNum,
+          payment_status: pendingDebt > 0.009 ? 'Pendiente' : 'Pagado',
+          created_by: user?.id
+        }
+
+        const firstTry = await supabase.from('purchases').insert([extendedPayload])
+        if (
+          firstTry.error &&
+          (firstTry.error.message.includes('amount_paid') ||
+            firstTry.error.message.includes('payment_status') ||
+            firstTry.error.message.includes('column'))
+        ) {
+          const { amount_paid, payment_status, ...fallbackPayload } = extendedPayload
+          const secondTry = await supabase.from('purchases').insert([fallbackPayload])
+          if (secondTry.error) throw secondTry.error
+        } else if (firstTry.error) {
+          throw firstTry.error
         }
       }
 
@@ -243,12 +303,89 @@ export default function Inventory() {
       setCost('')
       setPrice('')
       setStock('1')
+      setInitialSupplierDeposit('')
+      setPurchasePaymentType('cash')
       await fetchInventoryAndCapital()
     } catch (err: any) {
-      alert('Error al registrar ingreso: ' + err.message)
+      alert('Error al registrar compra: ' + err.message)
     } finally {
       setSaving(false)
     }
+  }
+
+  // Abrir modal para pagar o abonar una compra a crédito a proveedor
+  const openPaySupplierModal = (purchase: PurchaseRecord) => {
+    const debt = getPurchasePendingDebt(purchase)
+    setTargetCreditPurchase(purchase)
+    setSupplierInstallmentAmount(debt.toFixed(2))
+    setPaySupplierModalOpen(true)
+  }
+
+  // Confirmar pago o abono a proveedor (este abono SÍ descuenta del capital disponible)
+  const handleConfirmSupplierPayment = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!targetCreditPurchase) return
+
+    const total = Number(targetCreditPurchase.total_cost)
+    const currentPaid = getPurchasePaidAmount(targetCreditPurchase)
+    const currentDebt = getPurchasePendingDebt(targetCreditPurchase)
+    const payNow = Number(supplierInstallmentAmount)
+
+    if (isNaN(payNow) || payNow <= 0) {
+      alert('Ingresa un monto válido mayor a 0.')
+      return
+    }
+    if (payNow > currentDebt + 0.01) {
+      alert(`El abono (${payNow.toFixed(2)}) no puede superar el saldo pendiente (${currentDebt.toFixed(2)}).`)
+      return
+    }
+
+    setSavingSupplierPayment(true)
+    const newPaid = Number(Math.min(total, currentPaid + payNow).toFixed(2))
+    const newDebt = Number(Math.max(0, total - newPaid).toFixed(2))
+    const isSettled = newDebt <= 0.009
+    const pureSupplier = cleanSupplierName(targetCreditPurchase.supplier)
+
+    const updatedSupplierText = isSettled
+      ? `${pureSupplier} [Crédito Cancelado - Pagado: ${newPaid.toFixed(2)}]`
+      : `${pureSupplier} [Crédito - Pagado: ${newPaid.toFixed(2)} | Saldo: ${newDebt.toFixed(2)}]`
+
+    const extUpd = await supabase
+      .from('purchases')
+      .update({
+        supplier: updatedSupplierText,
+        amount_paid: newPaid,
+        payment_status: isSettled ? 'Pagado' : 'Pendiente'
+      })
+      .eq('id', targetCreditPurchase.id)
+
+    if (
+      extUpd.error &&
+      (extUpd.error.message.includes('amount_paid') ||
+        extUpd.error.message.includes('payment_status') ||
+        extUpd.error.message.includes('column'))
+    ) {
+      const fallbackUpd = await supabase
+        .from('purchases')
+        .update({ supplier: updatedSupplierText })
+        .eq('id', targetCreditPurchase.id)
+
+      if (fallbackUpd.error) {
+        alert('Error al registrar pago a proveedor: ' + fallbackUpd.error.message)
+        setSavingSupplierPayment(false)
+        return
+      }
+    } else if (extUpd.error) {
+      alert('Error al registrar pago a proveedor: ' + extUpd.error.message)
+      setSavingSupplierPayment(false)
+      return
+    }
+
+    setPaySupplierModalOpen(false)
+    setTargetCreditPurchase(null)
+    setSupplierInstallmentAmount('')
+    await fetchInventoryAndCapital()
+    setSavingSupplierPayment(false)
   }
 
   const handleUpdateStock = async (id: string, currentStock: number, delta: number) => {
@@ -445,11 +582,18 @@ export default function Inventory() {
     navigate('/login')
   }
 
-  // Cálculos de Capital y Compras (solo visibles para Admin)
-  const totalPurchasesSpent = purchases.reduce((sum, p) => sum + Number(p.total_cost), 0)
-  const remainingInitialCapital = initialCapital - totalPurchasesSpent
-  const availableLiquidFund = initialCapital - totalPurchasesSpent + totalSalesCollected
+  // Cálculos de Capital: SOLO lo efectivamente pagado en compras descuenta del capital
+  const totalPurchasesPaidFromCapital = purchases.reduce((sum, p) => sum + getPurchasePaidAmount(p), 0)
+  const totalSupplierDebt = purchases.reduce((sum, p) => sum + getPurchasePendingDebt(p), 0)
+  const pendingPurchasesCount = purchases.filter(p => getPurchasePendingDebt(p) > 0.009).length
+
+  const remainingInitialCapital = initialCapital - totalPurchasesPaidFromCapital
+  const availableLiquidFund = initialCapital - totalPurchasesPaidFromCapital + totalSalesCollected
   const formTotalPurchase = (Number(cost) || 0) * (Math.max(1, Number(stock) || 1))
+
+  const displayedPurchases = purchaseFilter === 'pending'
+    ? purchases.filter(p => getPurchasePendingDebt(p) > 0.009)
+    : purchases
 
   // Filtrado en tiempo real
   const filteredItems = items.filter(item => {
@@ -492,7 +636,7 @@ export default function Inventory() {
             </h1>
             <p className="text-sm text-gray-500">
               {isAdmin
-                ? 'Adquisición de equipos/periféricos con descuento de capital inicial y control de stock'
+                ? 'Compras al contado o a crédito (sin afectar capital hasta pagar), control de stock y repotenciación'
                 : 'Control de existencias, estado físico, ensamblaje y repotenciación de equipos'}
             </p>
           </div>
@@ -522,33 +666,40 @@ export default function Inventory() {
           </div>
         </div>
 
-        {/* Barra de Control de Capital Inicial vs Compras (SOLO ADMINISTRADOR) */}
+        {/* Barra de Control de Capital Inicial, Compras Pagadas y Compras a Crédito (SOLO ADMIN) */}
         {isAdmin && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
             <div className="bg-white p-4 rounded-lg shadow border-l-4 border-gray-800">
               <div className="flex justify-between items-start">
-                <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial Configurado</p>
+                <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial</p>
                 <button onClick={() => navigate('/settings')} className="text-[11px] text-blue-600 hover:underline">Editar</button>
               </div>
               <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">Fondo base configurado</p>
             </div>
 
             <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-500">
-              <p className="text-xs text-gray-500 uppercase font-semibold">Total Invertido en Compras</p>
-              <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesSpent.toFixed(2)}</p>
-              <p className="text-[11px] text-gray-400 mt-0.5">{purchases.length} compra(s) registrada(s)</p>
+              <p className="text-xs text-gray-500 uppercase font-semibold">Pagado en Compras</p>
+              <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesPaidFromCapital.toFixed(2)}</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">Ya descontado del capital</p>
+            </div>
+
+            <div className="bg-white p-4 rounded-lg shadow border-l-4 border-orange-500">
+              <p className="text-xs text-gray-500 uppercase font-semibold">Compras a Crédito (Deuda)</p>
+              <p className="text-xl font-bold text-orange-600 mt-1">{currency} {totalSupplierDebt.toFixed(2)}</p>
+              <p className="text-[11px] text-gray-500 mt-0.5">{pendingPurchasesCount} compra(s) sin descontar aún</p>
             </div>
 
             <div className="bg-white p-4 rounded-lg shadow border-l-4 border-amber-500">
-              <p className="text-xs text-gray-500 uppercase font-semibold">Saldo de Capital Inicial</p>
+              <p className="text-xs text-gray-500 uppercase font-semibold">Saldo Capital Inicial</p>
               <p className={`text-xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
                 {currency} {remainingInitialCapital.toFixed(2)}
               </p>
-              <p className="text-[11px] text-gray-400 mt-0.5">Capital inicial menos compras</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">Capital menos compras pagadas</p>
             </div>
 
             <div className="bg-white p-4 rounded-lg shadow border-l-4 border-emerald-600">
-              <p className="text-xs text-gray-500 uppercase font-semibold">Fondo Total Disponible (Con Ventas)</p>
+              <p className="text-xs text-gray-500 uppercase font-semibold">Fondo Total Disponible</p>
               <p className={`text-xl font-bold mt-1 ${availableLiquidFund >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
                 {currency} {availableLiquidFund.toFixed(2)}
               </p>
@@ -662,12 +813,15 @@ export default function Inventory() {
 
               {isAdmin && (
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Proveedor / Origen de Compra (Opcional)</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Proveedor / Acreedor {purchasePaymentType === 'credit' ? <span className="text-red-600">* (Obligatorio)</span> : '(Opcional)'}
+                  </label>
                   <input
                     type="text"
                     value={supplier}
                     onChange={e => setSupplier(e.target.value)}
-                    placeholder="Ej: Importadora Tech / Compra Particular"
+                    required={purchasePaymentType === 'credit'}
+                    placeholder="Ej: Importadora Tech / Distribuidor"
                     className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
@@ -716,22 +870,49 @@ export default function Inventory() {
               </div>
 
               {isAdmin && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
-                  <label className="flex items-center gap-2 text-xs font-semibold text-amber-900 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={deductFromCapital}
-                      onChange={e => setDeductFromCapital(e.target.checked)}
-                      className="rounded border-amber-400 text-amber-600"
-                    />
-                    Descontar compra del Capital Inicial
+                <div className="space-y-2.5 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                  <label className="block text-xs font-bold text-gray-800 uppercase">
+                    Modalidad de Pago de la Compra
                   </label>
-                  {deductFromCapital && (
-                    <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
-                      <span className="text-amber-800">Total a descontar:</span>
-                      <span className="font-bold text-red-700">
-                        - {currency} {formTotalPurchase.toFixed(2)}
-                      </span>
+                  <select
+                    value={purchasePaymentType}
+                    onChange={e => setPurchasePaymentType(e.target.value as 'cash' | 'credit' | 'none')}
+                    className="w-full border border-gray-300 p-2 rounded text-xs font-semibold bg-white"
+                  >
+                    <option value="cash">Contado (Descuenta del Capital ahora)</option>
+                    <option value="credit">A Crédito / Fiado (No descuenta capital aún)</option>
+                    <option value="none">Solo ingreso a stock (Sin movimiento de caja)</option>
+                  </select>
+
+                  {purchasePaymentType === 'cash' && (
+                    <div className="flex justify-between text-xs pt-1 border-t border-gray-200">
+                      <span className="text-gray-600">Se descontará del capital:</span>
+                      <span className="font-bold text-red-700">- {currency} {formTotalPurchase.toFixed(2)}</span>
+                    </div>
+                  )}
+
+                  {purchasePaymentType === 'credit' && (
+                    <div className="bg-orange-50 border border-orange-200 rounded p-2.5 space-y-2">
+                      <div>
+                        <label className="block text-[11px] font-bold text-orange-900 mb-1">
+                          Adelanto inicial pagado hoy ({currency}) — Opcional
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={initialSupplierDeposit}
+                          onChange={e => setInitialSupplierDeposit(e.target.value)}
+                          placeholder="0.00 (deja 0 si no pagas nada hoy)"
+                          className="w-full border border-orange-300 p-1.5 rounded text-xs bg-white font-semibold"
+                        />
+                      </div>
+                      <div className="flex justify-between text-[11px] pt-1 border-t border-orange-200">
+                        <span className="text-orange-900">Deuda pendiente con proveedor:</span>
+                        <span className="font-bold text-orange-700">
+                          {currency} {Math.max(0, formTotalPurchase - (Number(initialSupplierDeposit) || 0)).toFixed(2)}
+                        </span>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -740,18 +921,24 @@ export default function Inventory() {
               <button
                 type="submit"
                 disabled={saving}
-                className="w-full bg-blue-600 text-white font-semibold py-2.5 rounded hover:bg-blue-700 transition"
+                className={`w-full text-white font-semibold py-2.5 rounded transition ${
+                  isAdmin && purchasePaymentType === 'credit'
+                    ? 'bg-orange-600 hover:bg-orange-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
               >
                 {saving
                   ? 'Registrando...'
-                  : isAdmin && deductFromCapital
+                  : isAdmin && purchasePaymentType === 'cash'
                   ? `Registrar Compra (- ${currency} ${formTotalPurchase.toFixed(2)})`
+                  : isAdmin && purchasePaymentType === 'credit'
+                  ? `Registrar Compra a Crédito (${currency} ${formTotalPurchase.toFixed(2)})`
                   : 'Agregar al Inventario'}
               </button>
             </form>
           </div>
 
-          {/* Panel Derecho: Stock Actual (y Compras solo si es Admin) */}
+          {/* Panel Derecho: Stock Actual y Compras / Cuentas por Pagar */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
             <div className="flex flex-wrap justify-between items-center mb-4 gap-3 border-b pb-3">
               <div className="flex gap-2">
@@ -768,13 +955,18 @@ export default function Inventory() {
                 {isAdmin && (
                   <button
                     onClick={() => setActiveTab('purchases')}
-                    className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                    className={`px-4 py-1.5 rounded-lg text-sm font-bold transition flex items-center gap-1.5 ${
                       activeTab === 'purchases'
                         ? 'bg-red-600 text-white'
                         : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                     }`}
                   >
-                    Historial de Compras ({purchases.length})
+                    <span>Compras y Créditos ({purchases.length})</span>
+                    {pendingPurchasesCount > 0 && (
+                      <span className="bg-orange-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                        {pendingPurchasesCount} pend.
+                      </span>
+                    )}
                   </button>
                 )}
               </div>
@@ -786,6 +978,27 @@ export default function Inventory() {
                 >
                   Limpiar filtros
                 </button>
+              )}
+
+              {activeTab === 'purchases' && isAdmin && (
+                <div className="flex gap-1.5 bg-gray-100 p-1 rounded-lg">
+                  <button
+                    onClick={() => setPurchaseFilter('all')}
+                    className={`px-2.5 py-1 rounded text-xs font-semibold ${
+                      purchaseFilter === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
+                    }`}
+                  >
+                    Todas ({purchases.length})
+                  </button>
+                  <button
+                    onClick={() => setPurchaseFilter('pending')}
+                    className={`px-2.5 py-1 rounded text-xs font-semibold ${
+                      purchaseFilter === 'pending' ? 'bg-orange-500 text-white shadow-sm' : 'text-orange-700'
+                    }`}
+                  >
+                    Por Pagar ({pendingPurchasesCount})
+                  </button>
+                </div>
               )}
             </div>
 
@@ -926,42 +1139,74 @@ export default function Inventory() {
                 )}
               </>
             ) : (
-              /* Tabla de Historial de Compras Descontadas del Capital (SOLO ADMIN) */
+              /* Tabla de Historial de Compras y Cuentas por Pagar a Proveedores */
               <div>
-                {purchases.length === 0 ? (
+                {displayedPurchases.length === 0 ? (
                   <p className="text-sm text-gray-500">
-                    Aún no hay compras registradas con descuento de capital.
+                    {purchaseFilter === 'pending'
+                      ? 'No tienes compras a crédito pendientes de pago.'
+                      : 'Aún no hay compras registradas.'}
                   </p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="border-b bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
-                          <th className="p-3">Fecha</th>
-                          <th className="p-3">Equipo / Periférico</th>
-                          <th className="p-3">Categoría</th>
-                          <th className="p-3">Proveedor</th>
+                          <th className="p-3">Equipo / Proveedor</th>
                           <th className="p-3 text-center">Cant.</th>
-                          <th className="p-3">Costo Unit.</th>
-                          <th className="p-3">Total Descontado</th>
+                          <th className="p-3">Total Compra</th>
+                          <th className="p-3">Pagado</th>
+                          <th className="p-3">Saldo Deuda</th>
+                          <th className="p-3">Fecha</th>
+                          <th className="p-3 text-center">Acción</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y text-sm text-gray-700">
-                        {purchases.map(p => (
-                          <tr key={p.id} className="hover:bg-gray-50">
-                            <td className="p-3 text-xs text-gray-500">
-                              {new Date(p.created_at).toLocaleDateString()}
-                            </td>
-                            <td className="p-3 font-medium text-gray-900">{p.item_name}</td>
-                            <td className="p-3 text-xs">{p.category}</td>
-                            <td className="p-3 text-xs">{p.supplier || 'Proveedor General'}</td>
-                            <td className="p-3 text-center font-semibold">{p.quantity}</td>
-                            <td className="p-3">{currency} {Number(p.unit_cost).toFixed(2)}</td>
-                            <td className="p-3 font-bold text-red-600">
-                              - {currency} {Number(p.total_cost).toFixed(2)}
-                            </td>
-                          </tr>
-                        ))}
+                        {displayedPurchases.map(p => {
+                          const paid = getPurchasePaidAmount(p)
+                          const debt = getPurchasePendingDebt(p)
+                          const hasDebt = debt > 0.009
+                          return (
+                            <tr key={p.id} className={hasDebt ? 'bg-orange-50/50 hover:bg-orange-50' : 'hover:bg-gray-50'}>
+                              <td className="p-3">
+                                <p className="font-medium text-gray-900">{p.item_name}</p>
+                                <p className="text-xs text-gray-500">{cleanSupplierName(p.supplier)}</p>
+                                <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
+                                  hasDebt
+                                    ? 'bg-orange-100 text-orange-800'
+                                    : 'bg-green-100 text-green-800'
+                                }`}>
+                                  {hasDebt ? 'Crédito Pendiente' : 'Pagado'}
+                                </span>
+                              </td>
+                              <td className="p-3 text-center font-semibold">{p.quantity}</td>
+                              <td className="p-3 font-semibold">{currency} {Number(p.total_cost).toFixed(2)}</td>
+                              <td className="p-3 text-red-600 font-semibold">{currency} {paid.toFixed(2)}</td>
+                              <td className="p-3">
+                                {hasDebt ? (
+                                  <span className="font-bold text-orange-700">{currency} {debt.toFixed(2)}</span>
+                                ) : (
+                                  <span className="text-xs text-gray-400">{currency} 0.00</span>
+                                )}
+                              </td>
+                              <td className="p-3 text-xs text-gray-500">
+                                {new Date(p.created_at).toLocaleDateString()}
+                              </td>
+                              <td className="p-3 text-center">
+                                {hasDebt ? (
+                                  <button
+                                    onClick={() => openPaySupplierModal(p)}
+                                    className="bg-orange-600 hover:bg-orange-700 text-white px-2.5 py-1 rounded text-xs font-semibold transition"
+                                  >
+                                    Pagar / Abonar
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-green-700 font-medium">Liquidado</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -971,6 +1216,71 @@ export default function Inventory() {
           </div>
         </div>
       </div>
+
+      {/* Modal para Pagar / Abonar Compra a Crédito a Proveedor */}
+      {paySupplierModalOpen && targetCreditPurchase && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Pagar / Abonar Compra a Crédito</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Proveedor: <span className="font-semibold text-gray-800">{cleanSupplierName(targetCreditPurchase.supplier)}</span> — {targetCreditPurchase.item_name}
+            </p>
+
+            <div className="grid grid-cols-3 gap-2 bg-gray-50 p-3 rounded-lg border border-gray-200 text-center mb-4">
+              <div>
+                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Total Compra</span>
+                <span className="text-sm font-bold text-gray-800">{currency} {Number(targetCreditPurchase.total_cost).toFixed(2)}</span>
+              </div>
+              <div>
+                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Ya Pagado</span>
+                <span className="text-sm font-bold text-red-600">{currency} {getPurchasePaidAmount(targetCreditPurchase).toFixed(2)}</span>
+              </div>
+              <div>
+                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Deuda Actual</span>
+                <span className="text-sm font-bold text-orange-700">{currency} {getPurchasePendingDebt(targetCreditPurchase).toFixed(2)}</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleConfirmSupplierPayment} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Monto a pagar ahora ({currency}) — Se descontará del capital
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max={getPurchasePendingDebt(targetCreditPurchase)}
+                  value={supplierInstallmentAmount}
+                  onChange={e => setSupplierInstallmentAmount(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm font-bold text-orange-800"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaySupplierModalOpen(false)
+                    setTargetCreditPurchase(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingSupplierPayment}
+                  className="px-4 py-2 bg-orange-600 text-white rounded text-sm hover:bg-orange-700 font-semibold"
+                >
+                  {savingSupplierPayment ? 'Registrando...' : 'Confirmar Pago al Proveedor'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Modal de Edición de Equipo */}
       {editModalOpen && editingItem && (
