@@ -119,7 +119,7 @@ export default function Inventory() {
   }, [])
 
   const isAdmin = userRole === 'admin'
-  const canManageCost = isAdmin || userRole === 'technician'
+  const canManageCostAndPrice = isAdmin || userRole === 'technician'
 
   const getPurchasePaidAmount = (p: PurchaseRecord): number => {
     if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
@@ -244,8 +244,8 @@ export default function Inventory() {
   const handleRegisterPurchase = async (e: React.FormEvent) => {
     e.preventDefault()
     const qtyNum = Math.max(1, Number(stock) || 1)
-    const unitCostNum = canManageCost ? (Number(cost) || 0) : 0
-    const unitPriceNum = isAdmin ? (Number(price) || 0) : 0
+    const unitCostNum = canManageCostAndPrice ? (Number(cost) || 0) : 0
+    const unitPriceNum = canManageCostAndPrice ? (Number(price) || 0) : 0
     const totalPurchaseCost = Number((unitCostNum * qtyNum).toFixed(2))
 
     if (purchaseMode === 'new' && !name.trim()) return
@@ -294,7 +294,7 @@ export default function Inventory() {
 
         const prevTotalVal = existingItem.stock * Number(existingItem.cost)
         const newTotalStock = existingItem.stock + qtyNum
-        const weightedCost = canManageCost && newTotalStock > 0
+        const weightedCost = canManageCostAndPrice && newTotalStock > 0
           ? Number(((prevTotalVal + totalPurchaseCost) / newTotalStock).toFixed(2))
           : Number(existingItem.cost)
 
@@ -303,18 +303,26 @@ export default function Inventory() {
           .update({
             stock: newTotalStock,
             cost: weightedCost,
-            price: isAdmin && unitPriceNum > 0 ? unitPriceNum : existingItem.price
+            price: canManageCostAndPrice && unitPriceNum > 0 ? unitPriceNum : existingItem.price
           })
           .eq('id', existingItem.id)
 
         if (updErr) throw updErr
       }
 
-      if (isAdmin && purchasePaymentType !== 'none' && totalPurchaseCost > 0) {
-        const pendingDebt = Number((totalPurchaseCost - depositNum).toFixed(2))
+      // Si es Admin con modalidad de pago distinta de 'none', o si es Técnico y especificó un proveedor/costo
+      const shouldRecordPurchase =
+        (isAdmin && purchasePaymentType !== 'none' && totalPurchaseCost > 0) ||
+        (!isAdmin && canManageCostAndPrice && (supplier.trim() !== '' || totalPurchaseCost > 0))
+
+      if (shouldRecordPurchase) {
+        const pendingDebt = isAdmin ? Number((totalPurchaseCost - depositNum).toFixed(2)) : 0
+        const paidToRecord = isAdmin ? depositNum : 0
         const baseSupplier = supplier.trim() || 'Proveedor General'
         const encodedSupplier = isCreditPurchase
           ? `${baseSupplier} [Crédito - Pagado: ${depositNum.toFixed(2)} | Saldo: ${pendingDebt.toFixed(2)}]`
+          : !isAdmin
+          ? `${baseSupplier} [Ingreso Taller]`
           : baseSupplier
 
         const extendedPayload = {
@@ -324,7 +332,7 @@ export default function Inventory() {
           quantity: qtyNum,
           unit_cost: unitCostNum,
           total_cost: totalPurchaseCost,
-          amount_paid: depositNum,
+          amount_paid: paidToRecord,
           payment_status: pendingDebt > 0.009 ? 'Pendiente' : 'Pagado',
           created_by: user?.id
         }
@@ -354,7 +362,7 @@ export default function Inventory() {
       setPurchasePaymentType('cash')
       await fetchInventoryAndCapital()
     } catch (err: any) {
-      alert('Error al registrar compra: ' + err.message)
+      alert('Error al registrar ingreso: ' + err.message)
     } finally {
       setSaving(false)
     }
@@ -468,11 +476,8 @@ export default function Inventory() {
       stock: Math.max(0, Number(editStock) || 0)
     }
 
-    if (canManageCost) {
+    if (canManageCostAndPrice) {
       updatedFields.cost = Number(editCost) || 0
-    }
-
-    if (isAdmin) {
       updatedFields.price = Number(editPrice) || 0
     }
 
@@ -610,7 +615,7 @@ export default function Inventory() {
 
     const addedCostPerUnit = Number(component.cost) * componentQty
     const finalCost = Number(baseEquipment.cost) + addedCostPerUnit
-    const finalPrice = isAdmin
+    const finalPrice = canManageCostAndPrice
       ? (Number(newSalePrice) || Number(baseEquipment.price))
       : (Number(baseEquipment.price) + (Number(component.price) * componentQty))
 
@@ -817,7 +822,7 @@ export default function Inventory() {
             <p className="text-sm text-gray-500">
               {isAdmin
                 ? 'Compras al contado o a crédito, control de stock y repotenciación'
-                : 'Control de existencias, estado físico, ensamblaje y costos unitarios'}
+                : 'Control de existencias, proveedores, estado físico, ensamblaje y precios unitarios'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1002,23 +1007,21 @@ export default function Inventory() {
                 </>
               )}
 
-              {isAdmin && (
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    Proveedor / Acreedor {purchasePaymentType === 'credit' ? <span className="text-red-600">* (Obligatorio)</span> : '(Opcional)'}
-                  </label>
-                  <input
-                    type="text"
-                    value={supplier}
-                    onChange={e => setSupplier(e.target.value)}
-                    required={purchasePaymentType === 'credit'}
-                    placeholder="Ej: Importadora Tech / Distribuidor"
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
-                </div>
-              )}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Proveedor / Acreedor {isAdmin && purchasePaymentType === 'credit' ? <span className="text-red-600">* (Obligatorio)</span> : '(Opcional)'}
+                </label>
+                <input
+                  type="text"
+                  value={supplier}
+                  onChange={e => setSupplier(e.target.value)}
+                  required={isAdmin && purchasePaymentType === 'credit'}
+                  placeholder="Ej: Importadora Tech / Distribuidor"
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
+                />
+              </div>
 
-              <div className={`grid ${canManageCost && isAdmin ? 'grid-cols-3' : canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
+              <div className={`grid ${canManageCostAndPrice ? 'grid-cols-3' : 'grid-cols-1'} gap-2`}>
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
                   <input
@@ -1030,33 +1033,33 @@ export default function Inventory() {
                     className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
-                {canManageCost && (
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={cost}
-                      onChange={e => setCost(e.target.value)}
-                      required
-                      placeholder="0.00"
-                      className="w-full border border-gray-300 p-2 rounded text-sm"
-                    />
-                  </div>
-                )}
-                {isAdmin && (
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={price}
-                      onChange={e => setPrice(e.target.value)}
-                      required
-                      placeholder="0.00"
-                      className="w-full border border-gray-300 p-2 rounded text-sm"
-                    />
-                  </div>
+                {canManageCostAndPrice && (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={cost}
+                        onChange={e => setCost(e.target.value)}
+                        required
+                        placeholder="0.00"
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={price}
+                        onChange={e => setPrice(e.target.value)}
+                        required
+                        placeholder="0.00"
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -1248,8 +1251,8 @@ export default function Inventory() {
                           <th className="p-3">Equipo / Pieza</th>
                           <th className="p-3">Categoría</th>
                           <th className="p-3">Estado</th>
-                          {canManageCost && <th className="p-3">Costo</th>}
-                          {isAdmin && <th className="p-3">Venta</th>}
+                          {canManageCostAndPrice && <th className="p-3">Costo</th>}
+                          {canManageCostAndPrice && <th className="p-3">Venta</th>}
                           <th className="p-3 text-center">Stock</th>
                           <th className="p-3 text-center">Acciones</th>
                         </tr>
@@ -1260,8 +1263,8 @@ export default function Inventory() {
                             <td className="p-3 font-medium">{item.name}</td>
                             <td className="p-3 text-xs">{item.category}</td>
                             <td className="p-3 text-xs">{item.condition}</td>
-                            {canManageCost && <td className="p-3">{currency} {item.cost}</td>}
-                            {isAdmin && <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>}
+                            {canManageCostAndPrice && <td className="p-3">{currency} {item.cost}</td>}
+                            {canManageCostAndPrice && <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>}
                             <td className="p-3">
                               {isAdmin ? (
                                 <div className="flex items-center justify-center gap-1.5">
@@ -1291,10 +1294,10 @@ export default function Inventory() {
                             </td>
                             <td className="p-3">
                               <div className="flex items-center justify-center gap-1.5">
-                                {canManageCost && (
+                                {canManageCostAndPrice && (
                                   <button
                                     onClick={() => openEditModal(item)}
-                                    title="Editar equipo, costo o estado"
+                                    title="Editar equipo, costo, precio o estado"
                                     className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
                                   >
                                     Editar
@@ -1461,7 +1464,7 @@ export default function Inventory() {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Editar Equipo / Componente</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Modifica los datos, costo o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
+              Modifica los datos, costo, precio o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
             </p>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">
@@ -1504,32 +1507,32 @@ export default function Inventory() {
                 </div>
               </div>
 
-              <div className={`grid ${canManageCost && isAdmin ? 'grid-cols-3' : canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
-                {canManageCost && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editCost}
-                      onChange={e => setEditCost(e.target.value)}
-                      required
-                      className="w-full border border-gray-300 p-2 rounded text-sm"
-                    />
-                  </div>
-                )}
-                {isAdmin && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editPrice}
-                      onChange={e => setEditPrice(e.target.value)}
-                      required
-                      className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
-                    />
-                  </div>
+              <div className={`grid ${canManageCostAndPrice ? 'grid-cols-3' : 'grid-cols-1'} gap-3`}>
+                {canManageCostAndPrice && (
+                  <>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editCost}
+                        onChange={e => setEditCost(e.target.value)}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editPrice}
+                        onChange={e => setEditPrice(e.target.value)}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                      />
+                    </div>
+                  </>
                 )}
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Stock</label>
@@ -1742,7 +1745,7 @@ export default function Inventory() {
                     <input
                       type="text"
                       value={baseItemNameInput}
-                      onChange={e => baseItemNameInput}
+                      onChange={e => setBaseItemNameInput(e.target.value)}
                       required
                       placeholder="Ej: ThinkPad T480"
                       className="w-full border border-blue-300 p-2 rounded text-xs bg-white font-bold"
@@ -1795,7 +1798,7 @@ export default function Inventory() {
                   <option value="">-- Seleccionar pieza / componente --</option>
                   {availableComponents.map(comp => (
                     <option key={comp.id} value={comp.id}>
-                      [{comp.category}] {comp.name} (Stock: {comp.stock}{canManageCost ? ` | Costo: ${currency} ${comp.cost}` : ''})
+                      [{comp.category}] {comp.name} (Stock: {comp.stock}{canManageCostAndPrice ? ` | Costo: ${currency} ${comp.cost}` : ''})
                     </option>
                   ))}
                 </select>
@@ -1818,7 +1821,7 @@ export default function Inventory() {
                     />
                   </div>
 
-                  <div className={`grid ${canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
+                  <div className={`grid ${canManageCostAndPrice ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad a instalar</label>
                       <input
@@ -1831,7 +1834,7 @@ export default function Inventory() {
                         className="w-full border border-gray-300 p-2 rounded text-sm"
                       />
                     </div>
-                    {canManageCost && (
+                    {canManageCostAndPrice && (
                       <div className="bg-gray-50 p-2 rounded border border-gray-200 flex flex-col justify-center">
                         <span className="text-[11px] text-gray-500 uppercase font-semibold">Nuevo Costo Total</span>
                         <span className="text-base font-bold text-gray-900">
@@ -1852,7 +1855,7 @@ export default function Inventory() {
                     />
                   </div>
 
-                  {isAdmin && (
+                  {canManageCostAndPrice && (
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Nuevo Precio de Venta ({currency})</label>
                       <input
