@@ -829,6 +829,7 @@ export default function Inventory() {
                       >
                         <option value="Laptops">Laptops</option>
                         <option value="PCs de Escritorio">PCs de Escritorio</option>
+                        <option value="Tablets">Tablets</option>
                         <option value="Monitores">Monitores</option>
                         <option value="Componentes">Componentes (RAM, SSD)</option>
                         <option value="Periféricos">Periféricos y Accesorios</option>
@@ -1059,6 +1060,7 @@ export default function Inventory() {
                     <option value="Todas">Todas las categorías</option>
                     <option value="Laptops">Laptops</option>
                     <option value="PCs de Escritorio">PCs de Escritorio</option>
+                        <option value="Tablets">Tablets</option>
                     <option value="Monitores">Monitores</option>
                     <option value="Componentes">Componentes</option>
                     <option value="Periféricos">Periféricos</option>
@@ -1328,6 +1330,7 @@ export default function Inventory() {
                   >
                     <option value="Laptops">Laptops</option>
                     <option value="PCs de Escritorio">PCs de Escritorio</option>
+                        <option value="Tablets">Tablets</option>
                     <option value="Monitores">Monitores</option>
                     <option value="Componentes">Componentes (RAM, SSD, Discos)</option>
                     <option value="Periféricos">Periféricos y Accesorios</option>
