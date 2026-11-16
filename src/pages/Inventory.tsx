@@ -89,6 +89,13 @@ export default function Inventory() {
   const [newSalePrice, setNewSalePrice] = useState('')
   const [upgrading, setUpgrading] = useState(false)
 
+  // Modal de Eliminación con devolución opcional de componente al stock
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
+  const [itemToDelete, setItemToDelete] = useState<Equipment | null>(null)
+  const [returnComponentId, setReturnComponentId] = useState('')
+  const [returnQuantity, setReturnQuantity] = useState('1')
+  const [deletingWithRestock, setDeletingWithRestock] = useState(false)
+
   useEffect(() => {
     fetchInventoryAndCapital()
   }, [])
@@ -96,7 +103,6 @@ export default function Inventory() {
   const isAdmin = userRole === 'admin'
   const canManageCost = isAdmin || userRole === 'technician'
 
-  // Helpers para interpretar pagos y saldos de compras a crédito
   const getPurchasePaidAmount = (p: PurchaseRecord): number => {
     if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
       return Number(p.amount_paid)
@@ -450,21 +456,50 @@ export default function Inventory() {
     setUpdatingItem(false)
   }
 
-  const handleDeleteEquipment = async (item: Equipment) => {
-    const confirmed = window.confirm(
-      `¿Estás seguro de eliminar "${item.name}" del inventario? Esta acción no se puede deshacer.`
-    )
-    if (!confirmed) return
+  // Apertura del modal de eliminación con opción de devolver componente al stock
+  const openDeleteModal = (item: Equipment) => {
+    setItemToDelete(item)
+    setReturnComponentId('')
+    setReturnQuantity('1')
+    setDeleteModalOpen(true)
+  }
 
-    const { error } = await supabase
-      .from('inventory')
-      .delete()
-      .eq('id', item.id)
+  const handleConfirmDelete = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!itemToDelete) return
 
-    if (!error) {
-      setItems(items.filter(i => i.id !== item.id))
-    } else {
-      alert('No se pudo eliminar (puede estar asociado a una venta registrada): ' + error.message)
+    setDeletingWithRestock(true)
+    try {
+      // Si el usuario seleccionó un componente para devolver al stock
+      if (returnComponentId) {
+        const qtyToReturn = Math.max(1, Number(returnQuantity) || 1)
+        const compItem = items.find(i => i.id === returnComponentId)
+        if (compItem) {
+          const newStock = compItem.stock + qtyToReturn
+          const { error: restockErr } = await supabase
+            .from('inventory')
+            .update({ stock: newStock })
+            .eq('id', compItem.id)
+
+          if (restockErr) throw restockErr
+        }
+      }
+
+      // Eliminar el equipo del inventario
+      const { error: delErr } = await supabase
+        .from('inventory')
+        .delete()
+        .eq('id', itemToDelete.id)
+
+      if (delErr) throw delErr
+
+      setItems(items.filter(i => i.id !== itemToDelete.id))
+      setDeleteModalOpen(false)
+      setItemToDelete(null)
+    } catch (err: any) {
+      alert('Error al eliminar equipo y reingresar componente: ' + err.message)
+    } finally {
+      setDeletingWithRestock(false)
     }
   }
 
@@ -1127,7 +1162,7 @@ export default function Inventory() {
                                 )}
                                 {isAdmin && (
                                   <button
-                                    onClick={() => handleDeleteEquipment(item)}
+                                    onClick={() => openDeleteModal(item)}
                                     title="Eliminar registro"
                                     className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
                                   >
@@ -1370,6 +1405,76 @@ export default function Inventory() {
                   className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 font-semibold"
                 >
                   {updatingItem ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Eliminación con devolución opcional de componente al stock */}
+      {deleteModalOpen && itemToDelete && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Eliminar Equipo del Inventario</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Vas a eliminar <span className="font-semibold text-gray-800">{itemToDelete.name}</span>. Si este equipo tenía un disco duro o componente que deseas reingresar al stock, selecciónalo abajo.
+            </p>
+
+            <form onSubmit={handleConfirmDelete} className="space-y-4">
+              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-amber-900 mb-1">
+                    ¿Devolver componente al stock? (Opcional)
+                  </label>
+                  <select
+                    value={returnComponentId}
+                    onChange={e => setReturnComponentId(e.target.value)}
+                    className="w-full border border-amber-300 p-2 rounded text-xs bg-white font-medium"
+                  >
+                    <option value="">-- No devolver ningún componente --</option>
+                    {items.map(it => (
+                      <option key={it.id} value={it.id}>
+                        [{it.category}] {it.name} (Stock actual: {it.stock})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {returnComponentId && (
+                  <div>
+                    <label className="block text-xs font-semibold text-amber-900 mb-1">
+                      Cantidad a reingresar al stock
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={returnQuantity}
+                      onChange={e => setReturnQuantity(e.target.value)}
+                      required
+                      className="w-full border border-amber-300 p-2 rounded text-xs bg-white font-bold"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteModalOpen(false)
+                    setItemToDelete(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={deletingWithRestock}
+                  className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 font-semibold"
+                >
+                  {deletingWithRestock ? 'Eliminando...' : 'Confirmar Eliminación'}
                 </button>
               </div>
             </form>
