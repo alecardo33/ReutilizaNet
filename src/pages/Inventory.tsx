@@ -98,11 +98,10 @@ export default function Inventory() {
   const [newSalePrice, setNewSalePrice] = useState('')
   const [upgrading, setUpgrading] = useState(false)
 
-  // Modal de Eliminación con devolución opcional de componente al stock
+  // Modal de Eliminación con Detección Automática y Selección Múltiple
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [itemToDelete, setItemToDelete] = useState<Equipment | null>(null)
-  const [returnComponentId, setReturnComponentId] = useState('')
-  const [returnQuantity, setReturnQuantity] = useState('1')
+  const [returnSelections, setReturnSelections] = useState<{ [id: string]: { selected: boolean; quantity: number } }>({})
   const [deletingWithRestock, setDeletingWithRestock] = useState(false)
 
   // Modal de Deshacer Mejora (Undo Upgrade)
@@ -183,7 +182,6 @@ export default function Inventory() {
 
     if (!invRes.error && invRes.data) {
       setItems(invRes.data)
-      // Extract unique categories from existing items to ensure dynamic categories stay synced
       const existingCats = Array.from(new Set(invRes.data.map((i: any) => i.category).filter(Boolean)))
       if (existingCats.length > 0) {
         setCategories(prev => Array.from(new Set([...prev, ...existingCats])))
@@ -495,8 +493,21 @@ export default function Inventory() {
 
   const openDeleteModal = (item: Equipment) => {
     setItemToDelete(item)
-    setReturnComponentId('')
-    setReturnQuantity('1')
+    const initialSelections: { [id: string]: { selected: boolean; quantity: number } } = {}
+    
+    const upperName = item.name.toUpperCase()
+    items.forEach(i => {
+      if (i.id !== item.id) {
+        const compNameUpper = i.name.toUpperCase()
+        const isMentioned = upperName.includes(compNameUpper) || (upperName.includes('+') && upperName.split(' ').some(word => word.length > 3 && upperName.split('+')[1]?.includes(word)))
+        if (isMentioned) {
+          initialSelections[i.id] = { selected: true, quantity: item.stock }
+        } else {
+          initialSelections[i.id] = { selected: false, quantity: 1 }
+        }
+      }
+    })
+    setReturnSelections(initialSelections)
     setDeleteModalOpen(true)
   }
 
@@ -506,17 +517,18 @@ export default function Inventory() {
 
     setDeletingWithRestock(true)
     try {
-      if (returnComponentId) {
-        const qtyToReturn = Math.max(1, Number(returnQuantity) || 1)
-        const compItem = items.find(i => i.id === returnComponentId)
-        if (compItem) {
-          const newStock = compItem.stock + qtyToReturn
-          const { error: restockErr } = await supabase
-            .from('inventory')
-            .update({ stock: newStock })
-            .eq('id', compItem.id)
+      for (const [compId, sel] of Object.entries(returnSelections)) {
+        if (sel.selected && sel.quantity > 0) {
+          const compItem = items.find(i => i.id === compId)
+          if (compItem) {
+            const newStock = compItem.stock + Number(sel.quantity)
+            const { error: restockErr } = await supabase
+              .from('inventory')
+              .update({ stock: newStock })
+              .eq('id', compItem.id)
 
-          if (restockErr) throw restockErr
+            if (restockErr) throw restockErr
+          }
         }
       }
 
@@ -531,7 +543,7 @@ export default function Inventory() {
       setDeleteModalOpen(false)
       setItemToDelete(null)
     } catch (err: any) {
-      alert('Error al eliminar equipo y reingresar componente: ' + err.message)
+      alert('Error al eliminar equipo y reingresar componentes: ' + err.message)
     } finally {
       setDeletingWithRestock(false)
     }
@@ -657,13 +669,12 @@ export default function Inventory() {
     }
   }
 
-    const openUndoModal = (item: Equipment) => {
+  const openUndoModal = (item: Equipment) => {
     setItemToUndo(item)
     setUndoUnits(1)
     setReturnCompId('')
     setReturnCompQtyPerUnit(1)
     setTargetBaseId('')
-    // Suggest base item name by removing '+ ...' from upgraded item name if present
     const baseGuess = item.name.split('+')[0].trim()
     setBaseItemNameInput(baseGuess)
     setUndoModalOpen(true)
@@ -679,7 +690,6 @@ export default function Inventory() {
     try {
       const { data: { user } } = await supabase.auth.getUser()
 
-      // 1. Return component to stock if selected
       if (returnCompId) {
         const compItem = items.find(i => i.id === returnCompId)
         if (compItem) {
@@ -693,7 +703,6 @@ export default function Inventory() {
         }
       }
 
-      // 2. Reduce or delete the upgraded item stock
       const newUpgradedStock = itemToUndo.stock - unitsCount
       if (newUpgradedStock > 0) {
         const { error: updErr } = await supabase
@@ -709,7 +718,6 @@ export default function Inventory() {
         if (delErr) throw delErr
       }
 
-      // 3. Restore or increment base item stock
       if (targetBaseId) {
         const baseIt = items.find(i => i.id === targetBaseId)
         if (baseIt) {
@@ -721,9 +729,8 @@ export default function Inventory() {
           if (baseUpdErr) throw baseUpdErr
         }
       } else {
-        // Create new base item or restock
         const baseName = baseItemNameInput.trim() || itemToUndo.name.split('+')[0].trim() || 'Equipo Base'
-        const estimatedBaseCost = Math.max(0, Number(itemToUndo.cost) * 0.8) // approximate base cost
+        const estimatedBaseCost = Math.max(0, Number(itemToUndo.cost) * 0.8)
         const estimatedBasePrice = Math.max(0, Number(itemToUndo.price) * 0.8)
 
         const { error: insBaseErr } = await supabase
@@ -1558,49 +1565,65 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* Modal de Eliminación con devolución opcional de componente al stock */}
+      {/* Modal de Eliminación con Detección Automática y Selección Múltiple */}
       {deleteModalOpen && itemToDelete && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Eliminar Equipo del Inventario</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Vas a eliminar <span className="font-semibold text-gray-800">{itemToDelete.name}</span>. Si este equipo tenía un disco duro o componente que deseas reingresar al stock, selecciónalo abajo.
+              Vas a eliminar <span className="font-semibold text-gray-800">{itemToDelete.name}</span>. Se han identificado automáticamente los componentes asociados sugeridos para reingresar al stock:
             </p>
 
             <form onSubmit={handleConfirmDelete} className="space-y-4">
-              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-amber-900 mb-1">
-                    ¿Devolver componente al stock? (Opcional)
-                  </label>
-                  <select
-                    value={returnComponentId}
-                    onChange={e => setReturnComponentId(e.target.value)}
-                    className="w-full border border-amber-300 p-2 rounded text-xs bg-white font-medium"
-                  >
-                    <option value="">-- No devolver ningún componente --</option>
-                    {items.map(it => (
-                      <option key={it.id} value={it.id}>
-                        [{it.category}] {it.name} (Stock actual: {it.stock})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {returnComponentId && (
-                  <div>
-                    <label className="block text-xs font-semibold text-amber-900 mb-1">
-                      Cantidad a reingresar al stock
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={returnQuantity}
-                      onChange={e => setReturnQuantity(e.target.value)}
-                      required
-                      className="w-full border border-amber-300 p-2 rounded text-xs bg-white font-bold"
-                    />
-                  </div>
+              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg max-h-60 overflow-y-auto space-y-2.5">
+                <label className="block text-xs font-bold text-amber-900 uppercase">
+                  Selecciona los ítems a devolver al stock:
+                </label>
+                {items.filter(i => i.id !== itemToDelete.id).length === 0 ? (
+                  <p className="text-xs text-gray-500">No hay otros ítems en el inventario.</p>
+                ) : (
+                  items.filter(i => i.id !== itemToDelete.id).map(it => {
+                    const sel = returnSelections[it.id] || { selected: false, quantity: 1 }
+                    return (
+                      <div key={it.id} className="bg-white border border-amber-200 p-2.5 rounded flex items-center justify-between gap-2 shadow-sm">
+                        <div className="flex items-center gap-2 flex-1">
+                          <input
+                            type="checkbox"
+                            checked={sel.selected}
+                            onChange={e => {
+                              setReturnSelections({
+                                ...returnSelections,
+                                [it.id]: { ...sel, selected: e.target.checked }
+                              })
+                            }}
+                            className="rounded border-gray-300 text-amber-600 focus:ring-amber-500 w-4 h-4"
+                          />
+                          <div className="text-xs">
+                            <span className="font-bold text-gray-900">{it.name}</span>
+                            <span className="block text-[10px] text-gray-500">[{it.category}] - Stock actual: {it.stock}</span>
+                          </div>
+                        </div>
+                        {sel.selected && (
+                          <div className="w-20">
+                            <label className="block text-[10px] font-semibold text-gray-600 mb-0.5">Cantidad</label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={sel.quantity}
+                              onChange={e => {
+                                setReturnSelections({
+                                  ...returnSelections,
+                                  [it.id]: { ...sel, quantity: Math.max(1, Number(e.target.value) || 1) }
+                                })
+                              }}
+                              className="w-full border border-amber-300 p-1 rounded text-xs font-bold text-center bg-amber-50"
+                              required
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
                 )}
               </div>
 
@@ -1716,7 +1739,7 @@ export default function Inventory() {
                     <input
                       type="text"
                       value={baseItemNameInput}
-                      onChange={e => setBaseItemNameInput(e.target.value)}
+                      onChange={e => baseItemNameInput}
                       required
                       placeholder="Ej: ThinkPad T480"
                       className="w-full border border-blue-300 p-2 rounded text-xs bg-white font-bold"
