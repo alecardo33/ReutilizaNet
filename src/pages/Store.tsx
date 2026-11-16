@@ -58,7 +58,7 @@ export default function Store() {
 
     const [invRes, storeRes, settingsRes] = await Promise.all([
       supabase.from('inventory').select('*').order('name'),
-      supabase.from('store_products').select('*').order('created_at', { ascending: false }),
+      supabase.from('store_products').select('*').gt('stock', 0).order('created_at', { ascending: false }),
       supabase.from('company_settings').select('currency').eq('id', 1).single()
     ])
 
