@@ -99,7 +99,6 @@ export default function Cashbox() {
     // Si viene un producto desde la Tienda vía router state
     const productToSell = location.state?.productToSell
     if (productToSell) {
-      // Buscar si ya está en el carrito
       const foundInCart = cart.find(c => c.id === productToSell.id && c.item_type === 'store')
       if (!foundInCart) {
         const newItem: CartItem = {
@@ -220,7 +219,7 @@ export default function Cashbox() {
         }
       }
 
-      // 2. Registrar la venta en la tabla 'sales'
+      // 2. Registrar la venta en la tabla 'sales' con respaldo robusto si amount_paid no existe
       const salePayload = {
         customer_name: customerName.trim() || 'Cliente General',
         total_amount: totalAmount,
@@ -230,13 +229,24 @@ export default function Cashbox() {
         created_by: user?.id
       }
 
-      const { data: insertedSale, error: saleErr } = await supabase
-        .from('sales')
-        .insert([salePayload])
-        .select()
-        .single()
+      let insertedSale: any = null
+      const firstSaleTry = await supabase.from('sales').insert([salePayload]).select().single()
 
-      if (saleErr) throw saleErr
+      if (
+        firstSaleTry.error &&
+        (firstSaleTry.error.message.includes('amount_paid') ||
+          firstSaleTry.error.message.includes('payment_method') ||
+          firstSaleTry.error.message.includes('column'))
+      ) {
+        const { amount_paid, ...fallbackSalePayload } = salePayload
+        const secondSaleTry = await supabase.from('sales').insert([fallbackSalePayload]).select().single()
+        if (secondSaleTry.error) throw secondSaleTry.error
+        insertedSale = secondSaleTry.data
+      } else if (firstSaleTry.error) {
+        throw firstSaleTry.error
+      } else {
+        insertedSale = firstSaleTry.data
+      }
 
       setCompletedSaleData({
         id: insertedSale?.id || 'V-' + Date.now(),
@@ -520,7 +530,7 @@ export default function Cashbox() {
                 }}
                 className="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 rounded text-xs font-bold transition"
               >
-                Cerrar
+                Chrrar
               </button>
             </div>
           </div>
