@@ -94,6 +94,7 @@ export default function Inventory() {
   }, [])
 
   const isAdmin = userRole === 'admin'
+  const canManageCost = isAdmin || userRole === 'technician'
 
   // Helpers para interpretar pagos y saldos de compras a crédito
   const getPurchasePaidAmount = (p: PurchaseRecord): number => {
@@ -202,7 +203,7 @@ export default function Inventory() {
   const handleRegisterPurchase = async (e: React.FormEvent) => {
     e.preventDefault()
     const qtyNum = Math.max(1, Number(stock) || 1)
-    const unitCostNum = isAdmin ? (Number(cost) || 0) : 0
+    const unitCostNum = canManageCost ? (Number(cost) || 0) : 0
     const unitPriceNum = isAdmin ? (Number(price) || 0) : 0
     const totalPurchaseCost = Number((unitCostNum * qtyNum).toFixed(2))
 
@@ -252,7 +253,7 @@ export default function Inventory() {
 
         const prevTotalVal = existingItem.stock * Number(existingItem.cost)
         const newTotalStock = existingItem.stock + qtyNum
-        const weightedCost = isAdmin && newTotalStock > 0
+        const weightedCost = canManageCost && newTotalStock > 0
           ? Number(((prevTotalVal + totalPurchaseCost) / newTotalStock).toFixed(2))
           : Number(existingItem.cost)
 
@@ -268,7 +269,6 @@ export default function Inventory() {
         if (updErr) throw updErr
       }
 
-      // Registrar en historial de compras si es contado o crédito (si es 'none' no afecta capital ni deudas)
       if (isAdmin && purchasePaymentType !== 'none' && totalPurchaseCost > 0) {
         const pendingDebt = Number((totalPurchaseCost - depositNum).toFixed(2))
         const baseSupplier = supplier.trim() || 'Proveedor General'
@@ -319,7 +319,6 @@ export default function Inventory() {
     }
   }
 
-  // Abrir modal para pagar o abonar una compra a crédito a proveedor
   const openPaySupplierModal = (purchase: PurchaseRecord) => {
     const debt = getPurchasePendingDebt(purchase)
     setTargetCreditPurchase(purchase)
@@ -327,7 +326,6 @@ export default function Inventory() {
     setPaySupplierModalOpen(true)
   }
 
-  // Confirmar pago o abono a proveedor (este abono SÍ descuenta del capital disponible)
   const handleConfirmSupplierPayment = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!targetCreditPurchase) return
@@ -429,8 +427,11 @@ export default function Inventory() {
       stock: Math.max(0, Number(editStock) || 0)
     }
 
-    if (isAdmin) {
+    if (canManageCost) {
       updatedFields.cost = Number(editCost) || 0
+    }
+
+    if (isAdmin) {
       updatedFields.price = Number(editPrice) || 0
     }
 
@@ -588,7 +589,6 @@ export default function Inventory() {
     navigate('/login')
   }
 
-  // Cálculos de Capital: SOLO lo efectivamente pagado en compras descuenta del capital
   const totalPurchasesPaidFromCapital = purchases.reduce((sum, p) => sum + getPurchasePaidAmount(p), 0)
   const totalSupplierDebt = purchases.reduce((sum, p) => sum + getPurchasePendingDebt(p), 0)
   const pendingPurchasesCount = purchases.filter(p => getPurchasePendingDebt(p) > 0.009).length
@@ -601,7 +601,6 @@ export default function Inventory() {
     ? purchases.filter(p => getPurchasePendingDebt(p) > 0.009)
     : purchases
 
-  // Filtrado en tiempo real
   const filteredItems = items.filter(item => {
     const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase())
     const matchesCategory = filterCategory === 'Todas' || item.category === filterCategory
@@ -642,8 +641,8 @@ export default function Inventory() {
             </h1>
             <p className="text-sm text-gray-500">
               {isAdmin
-                ? 'Compras al contado o a crédito (sin afectar capital hasta pagar), control de stock y repotenciación'
-                : 'Control de existencias, estado físico, ensamblaje y repotenciación de equipos'}
+                ? 'Compras al contado o a crédito, control de stock y repotenciación'
+                : 'Control de existencias, estado físico, ensamblaje y costos unitarios'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -672,7 +671,6 @@ export default function Inventory() {
           </div>
         </div>
 
-        {/* Barra de Control de Capital Inicial, Compras Pagadas y Compras a Crédito (SOLO ADMIN) */}
         {isAdmin && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
             <div className="bg-white p-4 rounded-lg shadow border-l-4 border-gray-800">
@@ -717,7 +715,6 @@ export default function Inventory() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Formulario de Ingreso / Compra */}
           <div className="bg-white p-6 rounded-lg shadow h-fit">
             <h2 className="text-lg font-bold text-gray-800 mb-3">
               {isAdmin ? 'Registrar Compra / Ingreso' : 'Registrar Ingreso al Taller'}
@@ -835,7 +832,7 @@ export default function Inventory() {
                 </div>
               )}
 
-              <div className={`grid ${isAdmin ? 'grid-cols-3' : 'grid-cols-1'} gap-2`}>
+              <div className={`grid ${canManageCost && isAdmin ? 'grid-cols-3' : canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
                   <input
@@ -847,33 +844,33 @@ export default function Inventory() {
                     className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
+                {canManageCost && (
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={cost}
+                      onChange={e => setCost(e.target.value)}
+                      required
+                      placeholder="0.00"
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
+                )}
                 {isAdmin && (
-                  <>
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={cost}
-                        onChange={e => setCost(e.target.value)}
-                        required
-                        placeholder="0.00"
-                        className="w-full border border-gray-300 p-2 rounded text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={price}
-                        onChange={e => setPrice(e.target.value)}
-                        required
-                        placeholder="0.00"
-                        className="w-full border border-gray-300 p-2 rounded text-sm"
-                      />
-                    </div>
-                  </>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={price}
+                      onChange={e => setPrice(e.target.value)}
+                      required
+                      placeholder="0.00"
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
                 )}
               </div>
 
@@ -911,7 +908,7 @@ export default function Inventory() {
                           min="0"
                           value={initialSupplierDeposit}
                           onChange={e => setInitialSupplierDeposit(e.target.value)}
-                          placeholder="0.00 (deja 0 si no pagas nada hoy)"
+                          placeholder="0.00"
                           className="w-full border border-orange-300 p-1.5 rounded text-xs bg-white font-semibold"
                         />
                       </div>
@@ -946,7 +943,6 @@ export default function Inventory() {
             </form>
           </div>
 
-          {/* Panel Derecho: Stock Actual y Compras / Cuentas por Pagar */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
             <div className="flex flex-wrap justify-between items-center mb-4 gap-3 border-b pb-3">
               <div className="flex gap-2">
@@ -1012,7 +1008,6 @@ export default function Inventory() {
 
             {activeTab === 'stock' || !isAdmin ? (
               <>
-                {/* Barra de Búsqueda y Filtros */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
                   <input
                     type="text"
@@ -1069,12 +1064,8 @@ export default function Inventory() {
                           <th className="p-3">Equipo / Pieza</th>
                           <th className="p-3">Categoría</th>
                           <th className="p-3">Estado</th>
-                          {isAdmin && (
-                            <>
-                              <th className="p-3">Costo</th>
-                              <th className="p-3">Venta</th>
-                            </>
-                          )}
+                          {canManageCost && <th className="p-3">Costo</th>}
+                          {isAdmin && <th className="p-3">Venta</th>}
                           <th className="p-3 text-center">Stock</th>
                           <th className="p-3 text-center">Acciones</th>
                         </tr>
@@ -1085,12 +1076,8 @@ export default function Inventory() {
                             <td className="p-3 font-medium">{item.name}</td>
                             <td className="p-3 text-xs">{item.category}</td>
                             <td className="p-3 text-xs">{item.condition}</td>
-                            {isAdmin && (
-                              <>
-                                <td className="p-3">{currency} {item.cost}</td>
-                                <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
-                              </>
-                            )}
+                            {canManageCost && <td className="p-3">{currency} {item.cost}</td>}
+                            {isAdmin && <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>}
                             <td className="p-3">
                               {isAdmin ? (
                                 <div className="flex items-center justify-center gap-1.5">
@@ -1120,10 +1107,10 @@ export default function Inventory() {
                             </td>
                             <td className="p-3">
                               <div className="flex items-center justify-center gap-1.5">
-                                {isAdmin && (
+                                {canManageCost && (
                                   <button
                                     onClick={() => openEditModal(item)}
-                                    title="Editar equipo o estado"
+                                    title="Editar equipo, costo o estado"
                                     className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
                                   >
                                     Editar
@@ -1157,7 +1144,6 @@ export default function Inventory() {
                 )}
               </>
             ) : (
-              /* Tabla de Historial de Compras y Cuentas por Pagar a Proveedores */
               <div>
                 {displayedPurchases.length === 0 ? (
                   <p className="text-sm text-gray-500">
@@ -1189,13 +1175,6 @@ export default function Inventory() {
                               <td className="p-3">
                                 <p className="font-medium text-gray-900">{p.item_name}</p>
                                 <p className="text-xs text-gray-500">{cleanSupplierName(p.supplier)}</p>
-                                <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
-                                  hasDebt
-                                    ? 'bg-orange-100 text-orange-800'
-                                    : 'bg-green-100 text-green-800'
-                                }`}>
-                                  {hasDebt ? 'Crédito Pendiente' : 'Pagado'}
-                                </span>
                               </td>
                               <td className="p-3 text-center font-semibold">{p.quantity}</td>
                               <td className="p-3 font-semibold">{currency} {Number(p.total_cost).toFixed(2)}</td>
@@ -1235,7 +1214,6 @@ export default function Inventory() {
         </div>
       </div>
 
-      {/* Modal para Pagar / Abonar Compra a Crédito a Proveedor */}
       {paySupplierModalOpen && targetCreditPurchase && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
@@ -1244,25 +1222,10 @@ export default function Inventory() {
               Proveedor: <span className="font-semibold text-gray-800">{cleanSupplierName(targetCreditPurchase.supplier)}</span> — {targetCreditPurchase.item_name}
             </p>
 
-            <div className="grid grid-cols-3 gap-2 bg-gray-50 p-3 rounded-lg border border-gray-200 text-center mb-4">
-              <div>
-                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Total Compra</span>
-                <span className="text-sm font-bold text-gray-800">{currency} {Number(targetCreditPurchase.total_cost).toFixed(2)}</span>
-              </div>
-              <div>
-                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Ya Pagado</span>
-                <span className="text-sm font-bold text-red-600">{currency} {getPurchasePaidAmount(targetCreditPurchase).toFixed(2)}</span>
-              </div>
-              <div>
-                <span className="block text-[10px] uppercase text-gray-500 font-semibold">Deuda Actual</span>
-                <span className="text-sm font-bold text-orange-700">{currency} {getPurchasePendingDebt(targetCreditPurchase).toFixed(2)}</span>
-              </div>
-            </div>
-
             <form onSubmit={handleConfirmSupplierPayment} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Monto a pagar ahora ({currency}) — Se descontará del capital
+                  Monto a pagar ahora ({currency})
                 </label>
                 <input
                   type="number"
@@ -1292,7 +1255,7 @@ export default function Inventory() {
                   disabled={savingSupplierPayment}
                   className="px-4 py-2 bg-orange-600 text-white rounded text-sm hover:bg-orange-700 font-semibold"
                 >
-                  {savingSupplierPayment ? 'Registrando...' : 'Confirmar Pago al Proveedor'}
+                  {savingSupplierPayment ? 'Registrando...' : 'Confirmar Pago'}
                 </button>
               </div>
             </form>
@@ -1300,13 +1263,12 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* Modal de Edición de Equipo */}
       {editModalOpen && editingItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Editar Equipo / Componente</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Modifica los datos o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
+              Modifica los datos, costo o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
             </p>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">
@@ -1351,32 +1313,32 @@ export default function Inventory() {
                 </div>
               </div>
 
-              <div className={`grid ${isAdmin ? 'grid-cols-3' : 'grid-cols-1'} gap-3`}>
+              <div className={`grid ${canManageCost && isAdmin ? 'grid-cols-3' : canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
+                {canManageCost && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editCost}
+                      onChange={e => setEditCost(e.target.value)}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-sm"
+                    />
+                  </div>
+                )}
                 {isAdmin && (
-                  <>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={editCost}
-                        onChange={e => setEditCost(e.target.value)}
-                        required
-                        className="w-full border border-gray-300 p-2 rounded text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={editPrice}
-                        onChange={e => setEditPrice(e.target.value)}
-                        required
-                        className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
-                      />
-                    </div>
-                  </>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editPrice}
+                      onChange={e => setEditPrice(e.target.value)}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                    />
+                  </div>
                 )}
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Stock</label>
@@ -1415,18 +1377,17 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* Modal de Mejora / Ensamblaje de Equipo */}
       {upgradeModalOpen && baseEquipment && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Mejorar / Repotenciar Equipo</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Instala un componente de tu inventario en <span className="font-semibold text-gray-800">{baseEquipment.name}</span>. Se descontará automáticamente del stock disponible.
+              Instala un componente en <span className="font-semibold text-gray-800">{baseEquipment.name}</span>. Se descontará del stock disponible.
             </p>
 
             <form onSubmit={handleApplyUpgrade} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Componente a Instalar (Stock disponible)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Componente a Instalar</label>
                 <select
                   value={selectedComponentId}
                   onChange={e => handleSelectComponent(e.target.value)}
@@ -1436,7 +1397,7 @@ export default function Inventory() {
                   <option value="">-- Seleccionar pieza / componente --</option>
                   {availableComponents.map(comp => (
                     <option key={comp.id} value={comp.id}>
-                      [{comp.category}] {comp.name} (Stock: {comp.stock}{isAdmin ? ` | Costo: ${currency} ${comp.cost}` : ''})
+                      [{comp.category}] {comp.name} (Stock: {comp.stock}{canManageCost ? ` | Costo: ${currency} ${comp.cost}` : ''})
                     </option>
                   ))}
                 </select>
@@ -1444,7 +1405,7 @@ export default function Inventory() {
 
               {selectedComponent && (
                 <>
-                  <div className={`grid ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
+                  <div className={`grid ${canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad a instalar</label>
                       <input
@@ -1457,7 +1418,7 @@ export default function Inventory() {
                         className="w-full border border-gray-300 p-2 rounded text-sm"
                       />
                     </div>
-                    {isAdmin && (
+                    {canManageCost && (
                       <div className="bg-gray-50 p-2 rounded border border-gray-200 flex flex-col justify-center">
                         <span className="text-[11px] text-gray-500 uppercase font-semibold">Nuevo Costo Total</span>
                         <span className="text-base font-bold text-gray-900">
