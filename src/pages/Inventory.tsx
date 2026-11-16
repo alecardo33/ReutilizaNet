@@ -26,6 +26,7 @@ interface PurchaseRecord {
 
 export default function Inventory() {
   const navigate = useNavigate()
+  const [userRole, setUserRole] = useState<string>('')
   const [items, setItems] = useState<Equipment[]>([])
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [currency, setCurrency] = useState('Bs.')
@@ -79,6 +80,8 @@ export default function Inventory() {
     fetchInventoryAndCapital()
   }, [])
 
+  const isAdmin = userRole === 'admin'
+
   const getSalePaidAmount = (sale: any): number => {
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
@@ -93,11 +96,26 @@ export default function Inventory() {
 
   const fetchInventoryAndCapital = async () => {
     setLoading(true)
-    const [invRes, settingsRes, purchasesRes, salesRes] = await Promise.all([
+    const { data: { user } } = await supabase.auth.getUser()
+
+    let detectedRole = ''
+    if (user) {
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single()
+      if (profileData?.role) {
+        detectedRole = profileData.role
+        setUserRole(profileData.role)
+      }
+    }
+
+    const adminCheck = detectedRole === 'admin'
+
+    const [invRes, settingsRes] = await Promise.all([
       supabase.from('inventory').select('*').order('created_at', { ascending: false }),
-      supabase.from('company_settings').select('currency, initial_capital').eq('id', 1).single(),
-      supabase.from('purchases').select('*').order('created_at', { ascending: false }),
-      supabase.from('sales').select('total_amount, amount_paid, payment_method')
+      supabase.from('company_settings').select('currency, initial_capital').eq('id', 1).single()
     ])
 
     if (!invRes.error && invRes.data) {
@@ -105,15 +123,26 @@ export default function Inventory() {
     }
     if (settingsRes.data) {
       if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
-      setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+      if (adminCheck) {
+        setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+      }
     }
-    if (!purchasesRes.error && purchasesRes.data) {
-      setPurchases(purchasesRes.data)
+
+    // Solo cargar compras y ventas cobradas si es administrador
+    if (adminCheck) {
+      const [purchasesRes, salesRes] = await Promise.all([
+        supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+        supabase.from('sales').select('total_amount, amount_paid, payment_method')
+      ])
+      if (!purchasesRes.error && purchasesRes.data) {
+        setPurchases(purchasesRes.data)
+      }
+      if (!salesRes.error && salesRes.data) {
+        const collected = salesRes.data.reduce((sum, s) => sum + getSalePaidAmount(s), 0)
+        setTotalSalesCollected(collected)
+      }
     }
-    if (!salesRes.error && salesRes.data) {
-      const collected = salesRes.data.reduce((sum, s) => sum + getSalePaidAmount(s), 0)
-      setTotalSalesCollected(collected)
-    }
+
     setLoading(false)
   }
 
@@ -132,8 +161,8 @@ export default function Inventory() {
   const handleRegisterPurchase = async (e: React.FormEvent) => {
     e.preventDefault()
     const qtyNum = Math.max(1, Number(stock) || 1)
-    const unitCostNum = Number(cost) || 0
-    const unitPriceNum = Number(price) || 0
+    const unitCostNum = isAdmin ? (Number(cost) || 0) : 0
+    const unitPriceNum = isAdmin ? (Number(price) || 0) : 0
     const totalPurchaseCost = Number((unitCostNum * qtyNum).toFixed(2))
 
     if (purchaseMode === 'new' && !name.trim()) return
@@ -168,27 +197,26 @@ export default function Inventory() {
         recordedItemName = existingItem.name
         recordedCategory = existingItem.category
 
-        // Calcular costo promedio ponderado si cambia el costo de compra
         const prevTotalVal = existingItem.stock * Number(existingItem.cost)
         const newTotalStock = existingItem.stock + qtyNum
-        const weightedCost = newTotalStock > 0
+        const weightedCost = isAdmin && newTotalStock > 0
           ? Number(((prevTotalVal + totalPurchaseCost) / newTotalStock).toFixed(2))
-          : unitCostNum
+          : Number(existingItem.cost)
 
         const { error: updErr } = await supabase
           .from('inventory')
           .update({
             stock: newTotalStock,
             cost: weightedCost,
-            price: unitPriceNum > 0 ? unitPriceNum : existingItem.price
+            price: isAdmin && unitPriceNum > 0 ? unitPriceNum : existingItem.price
           })
           .eq('id', existingItem.id)
 
         if (updErr) throw updErr
       }
 
-      // Registrar movimiento de compra para descontar del Capital Inicial
-      if (deductFromCapital && totalPurchaseCost > 0) {
+      // Registrar movimiento de compra solo si es admin y marcó descontar de capital
+      if (isAdmin && deductFromCapital && totalPurchaseCost > 0) {
         const { error: purErr } = await supabase.from('purchases').insert([
           {
             item_name: recordedItemName,
@@ -203,7 +231,7 @@ export default function Inventory() {
 
         if (purErr) {
           alert(
-            'El equipo se agregó al inventario, pero falta crear la tabla "purchases" en Supabase para registrar el descuento del capital: ' +
+            'El equipo se agregó al inventario, pero hubo un problema al registrar en purchases: ' +
               purErr.message
           )
         }
@@ -217,7 +245,7 @@ export default function Inventory() {
       setStock('1')
       await fetchInventoryAndCapital()
     } catch (err: any) {
-      alert('Error al registrar compra: ' + err.message)
+      alert('Error al registrar ingreso: ' + err.message)
     } finally {
       setSaving(false)
     }
@@ -251,13 +279,16 @@ export default function Inventory() {
     if (!editingItem || !editName.trim()) return
 
     setUpdatingItem(true)
-    const updatedFields = {
+    const updatedFields: Partial<Equipment> = {
       name: editName.trim(),
       category: editCategory,
       condition: editCondition,
-      cost: Number(editCost) || 0,
-      price: Number(editPrice) || 0,
       stock: Math.max(0, Number(editStock) || 0)
+    }
+
+    if (isAdmin) {
+      updatedFields.cost = Number(editCost) || 0
+      updatedFields.price = Number(editPrice) || 0
     }
 
     const { error } = await supabase
@@ -350,7 +381,9 @@ export default function Inventory() {
 
     const addedCost = Number(component.cost) * componentQty
     const finalCost = Number(baseEquipment.cost) + addedCost
-    const finalPrice = Number(newSalePrice) || Number(baseEquipment.price)
+    const finalPrice = isAdmin
+      ? (Number(newSalePrice) || Number(baseEquipment.price))
+      : (Number(baseEquipment.price) + (Number(component.price) * componentQty))
 
     try {
       const { error: compError } = await supabase
@@ -412,7 +445,7 @@ export default function Inventory() {
     navigate('/login')
   }
 
-  // Cálculos de Capital y Compras
+  // Cálculos de Capital y Compras (solo visibles para Admin)
   const totalPurchasesSpent = purchases.reduce((sum, p) => sum + Number(p.total_cost), 0)
   const remainingInitialCapital = initialCapital - totalPurchasesSpent
   const availableLiquidFund = initialCapital - totalPurchasesSpent + totalSalesCollected
@@ -454,68 +487,82 @@ export default function Inventory() {
       <div className="max-w-7xl mx-auto">
         <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Módulo de Compras, Inventario y Taller</h1>
-            <p className="text-sm text-gray-500">Adquisición de equipos/periféricos con descuento de capital inicial y control de stock</p>
+            <h1 className="text-2xl font-bold text-gray-800">
+              {isAdmin ? 'Módulo de Compras, Inventario y Taller' : 'Módulo de Taller e Inventario Técnico'}
+            </h1>
+            <p className="text-sm text-gray-500">
+              {isAdmin
+                ? 'Adquisición de equipos/periféricos con descuento de capital inicial y control de stock'
+                : 'Control de existencias, estado físico, ensamblaje y repotenciación de equipos'}
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
-              Inicio
-            </button>
-            <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
-              Ir a Caja
-            </button>
-            <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
-              Reportes
-            </button>
-            <button onClick={() => navigate('/admin/users')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
-              Usuarios
-            </button>
-            <button onClick={() => navigate('/settings')} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-900">
-              Configuración
-            </button>
+            {isAdmin && (
+              <>
+                <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+                  Inicio
+                </button>
+                <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
+                  Ir a Caja
+                </button>
+                <button onClick={() => navigate('/reports')} className="bg-purple-600 text-white px-4 py-2 rounded text-sm hover:bg-purple-700">
+                  Reportes
+                </button>
+                <button onClick={() => navigate('/admin/users')} className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+                  Usuarios
+                </button>
+                <button onClick={() => navigate('/settings')} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-900">
+                  Configuración
+                </button>
+              </>
+            )}
             <button onClick={handleLogout} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
               Cerrar Sesión
             </button>
           </div>
         </div>
 
-        {/* Barra de Control de Capital Inicial vs Compras */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-gray-800">
-            <div className="flex justify-between items-start">
-              <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial Configurado</p>
-              <button onClick={() => navigate('/settings')} className="text-[11px] text-blue-600 hover:underline">Editar</button>
+        {/* Barra de Control de Capital Inicial vs Compras (SOLO ADMINISTRADOR) */}
+        {isAdmin && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div className="bg-white p-4 rounded-lg shadow border-l-4 border-gray-800">
+              <div className="flex justify-between items-start">
+                <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial Configurado</p>
+                <button onClick={() => navigate('/settings')} className="text-[11px] text-blue-600 hover:underline">Editar</button>
+              </div>
+              <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
             </div>
-            <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
-          </div>
 
-          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Total Invertido en Compras</p>
-            <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesSpent.toFixed(2)}</p>
-            <p className="text-[11px] text-gray-400 mt-0.5">{purchases.length} compra(s) registrada(s)</p>
-          </div>
+            <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-500">
+              <p className="text-xs text-gray-500 uppercase font-semibold">Total Invertido en Compras</p>
+              <p className="text-xl font-bold text-red-600 mt-1">- {currency} {totalPurchasesSpent.toFixed(2)}</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">{purchases.length} compra(s) registrada(s)</p>
+            </div>
 
-          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-amber-500">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Saldo de Capital Inicial</p>
-            <p className={`text-xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
-              {currency} {remainingInitialCapital.toFixed(2)}
-            </p>
-            <p className="text-[11px] text-gray-400 mt-0.5">Capital inicial menos compras</p>
-          </div>
+            <div className="bg-white p-4 rounded-lg shadow border-l-4 border-amber-500">
+              <p className="text-xs text-gray-500 uppercase font-semibold">Saldo de Capital Inicial</p>
+              <p className={`text-xl font-bold mt-1 ${remainingInitialCapital >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
+                {currency} {remainingInitialCapital.toFixed(2)}
+              </p>
+              <p className="text-[11px] text-gray-400 mt-0.5">Capital inicial menos compras</p>
+            </div>
 
-          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-emerald-600">
-            <p className="text-xs text-gray-500 uppercase font-semibold">Fondo Total Disponible (Con Ventas)</p>
-            <p className={`text-xl font-bold mt-1 ${availableLiquidFund >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-              {currency} {availableLiquidFund.toFixed(2)}
-            </p>
-            <p className="text-[11px] text-gray-400 mt-0.5">Saldo capital + ventas cobradas</p>
+            <div className="bg-white p-4 rounded-lg shadow border-l-4 border-emerald-600">
+              <p className="text-xs text-gray-500 uppercase font-semibold">Fondo Total Disponible (Con Ventas)</p>
+              <p className={`text-xl font-bold mt-1 ${availableLiquidFund >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                {currency} {availableLiquidFund.toFixed(2)}
+              </p>
+              <p className="text-[11px] text-gray-400 mt-0.5">Saldo capital + ventas cobradas</p>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Formulario de Compra / Registro */}
+          {/* Formulario de Ingreso / Compra */}
           <div className="bg-white p-6 rounded-lg shadow h-fit">
-            <h2 className="text-lg font-bold text-gray-800 mb-3">Registrar Compra / Ingreso</h2>
+            <h2 className="text-lg font-bold text-gray-800 mb-3">
+              {isAdmin ? 'Registrar Compra / Ingreso' : 'Registrar Ingreso al Taller'}
+            </h2>
 
             <div className="grid grid-cols-2 gap-1.5 bg-gray-100 p-1 rounded-lg mb-4">
               <button
@@ -545,7 +592,7 @@ export default function Inventory() {
                   purchaseMode === 'existing' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
                 }`}
               >
-                Reabastecer Existente
+                Sumar a Existente
               </button>
             </div>
 
@@ -613,18 +660,20 @@ export default function Inventory() {
                 </>
               )}
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Proveedor / Origen de Compra (Opcional)</label>
-                <input
-                  type="text"
-                  value={supplier}
-                  onChange={e => setSupplier(e.target.value)}
-                  placeholder="Ej: Importadora Tech / Compra Particular"
-                  className="w-full border border-gray-300 p-2 rounded text-sm"
-                />
-              </div>
+              {isAdmin && (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Proveedor / Origen de Compra (Opcional)</label>
+                  <input
+                    type="text"
+                    value={supplier}
+                    onChange={e => setSupplier(e.target.value)}
+                    placeholder="Ej: Importadora Tech / Compra Particular"
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+              )}
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className={`grid ${isAdmin ? 'grid-cols-3' : 'grid-cols-1'} gap-2`}>
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Cantidad</label>
                   <input
@@ -636,51 +685,57 @@ export default function Inventory() {
                     className="w-full border border-gray-300 p-2 rounded text-sm"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={cost}
-                    onChange={e => setCost(e.target.value)}
-                    required
-                    placeholder="0.00"
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={price}
-                    onChange={e => setPrice(e.target.value)}
-                    required
-                    placeholder="0.00"
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
-                <label className="flex items-center gap-2 text-xs font-semibold text-amber-900 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={deductFromCapital}
-                    onChange={e => setDeductFromCapital(e.target.checked)}
-                    className="rounded border-amber-400 text-amber-600"
-                  />
-                  Descontar compra del Capital Inicial
-                </label>
-                {deductFromCapital && (
-                  <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
-                    <span className="text-amber-800">Total a descontar:</span>
-                    <span className="font-bold text-red-700">
-                      - {currency} {formTotalPurchase.toFixed(2)}
-                    </span>
-                  </div>
+                {isAdmin && (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Costo Unit. ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={cost}
+                        onChange={e => setCost(e.target.value)}
+                        required
+                        placeholder="0.00"
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Precio Venta ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={price}
+                        onChange={e => setPrice(e.target.value)}
+                        required
+                        placeholder="0.00"
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                  </>
                 )}
               </div>
+
+              {isAdmin && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-amber-900 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={deductFromCapital}
+                      onChange={e => setDeductFromCapital(e.target.checked)}
+                      className="rounded border-amber-400 text-amber-600"
+                    />
+                    Descontar compra del Capital Inicial
+                  </label>
+                  {deductFromCapital && (
+                    <div className="flex justify-between text-xs pt-1 border-t border-amber-200">
+                      <span className="text-amber-800">Total a descontar:</span>
+                      <span className="font-bold text-red-700">
+                        - {currency} {formTotalPurchase.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <button
                 type="submit"
@@ -689,14 +744,14 @@ export default function Inventory() {
               >
                 {saving
                   ? 'Registrando...'
-                  : deductFromCapital
+                  : isAdmin && deductFromCapital
                   ? `Registrar Compra (- ${currency} ${formTotalPurchase.toFixed(2)})`
                   : 'Agregar al Inventario'}
               </button>
             </form>
           </div>
 
-          {/* Panel Derecho: Pestañas de Stock Actual e Historial de Compras */}
+          {/* Panel Derecho: Stock Actual (y Compras solo si es Admin) */}
           <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow">
             <div className="flex flex-wrap justify-between items-center mb-4 gap-3 border-b pb-3">
               <div className="flex gap-2">
@@ -710,16 +765,18 @@ export default function Inventory() {
                 >
                   Inventario Actual ({items.length})
                 </button>
-                <button
-                  onClick={() => setActiveTab('purchases')}
-                  className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
-                    activeTab === 'purchases'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  Historial de Compras ({purchases.length})
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => setActiveTab('purchases')}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-bold transition ${
+                      activeTab === 'purchases'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    Historial de Compras ({purchases.length})
+                  </button>
+                )}
               </div>
 
               {activeTab === 'stock' && hasActiveFilters && (
@@ -732,7 +789,7 @@ export default function Inventory() {
               )}
             </div>
 
-            {activeTab === 'stock' ? (
+            {activeTab === 'stock' || !isAdmin ? (
               <>
                 {/* Barra de Búsqueda y Filtros */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
@@ -778,9 +835,9 @@ export default function Inventory() {
                 </div>
 
                 {loading ? (
-                  <p className="text-gray-500 text-sm">Cargando inventario desde Supabase...</p>
+                  <p className="text-gray-500 text-sm">Cargando inventario...</p>
                 ) : items.length === 0 ? (
-                  <p className="text-gray-500 text-sm">No hay equipos registrados aún. Registra tu primera compra desde el formulario.</p>
+                  <p className="text-gray-500 text-sm">No hay equipos registrados aún.</p>
                 ) : filteredItems.length === 0 ? (
                   <p className="text-gray-500 text-sm">Ningún equipo coincide con los filtros aplicados.</p>
                 ) : (
@@ -791,8 +848,12 @@ export default function Inventory() {
                           <th className="p-3">Equipo / Pieza</th>
                           <th className="p-3">Categoría</th>
                           <th className="p-3">Estado</th>
-                          <th className="p-3">Costo</th>
-                          <th className="p-3">Venta</th>
+                          {isAdmin && (
+                            <>
+                              <th className="p-3">Costo</th>
+                              <th className="p-3">Venta</th>
+                            </>
+                          )}
                           <th className="p-3 text-center">Stock</th>
                           <th className="p-3 text-center">Acciones</th>
                         </tr>
@@ -803,8 +864,12 @@ export default function Inventory() {
                             <td className="p-3 font-medium">{item.name}</td>
                             <td className="p-3 text-xs">{item.category}</td>
                             <td className="p-3 text-xs">{item.condition}</td>
-                            <td className="p-3">{currency} {item.cost}</td>
-                            <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
+                            {isAdmin && (
+                              <>
+                                <td className="p-3">{currency} {item.cost}</td>
+                                <td className="p-3 font-semibold text-green-700">{currency} {item.price}</td>
+                              </>
+                            )}
                             <td className="p-3">
                               <div className="flex items-center justify-center gap-1.5">
                                 <button
@@ -828,7 +893,7 @@ export default function Inventory() {
                               <div className="flex items-center justify-center gap-1.5">
                                 <button
                                   onClick={() => openEditModal(item)}
-                                  title="Editar equipo, precios o estado"
+                                  title="Editar equipo o estado"
                                   className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
                                 >
                                   Editar
@@ -842,13 +907,15 @@ export default function Inventory() {
                                     + Mejorar
                                   </button>
                                 )}
-                                <button
-                                  onClick={() => handleDeleteEquipment(item)}
-                                  title="Eliminar registro"
-                                  className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
-                                >
-                                  ✕
-                                </button>
+                                {isAdmin && (
+                                  <button
+                                    onClick={() => handleDeleteEquipment(item)}
+                                    title="Eliminar registro"
+                                    className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2 py-1 rounded transition"
+                                  >
+                                    ✕
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -859,11 +926,11 @@ export default function Inventory() {
                 )}
               </>
             ) : (
-              /* Tabla de Historial de Compras Descontadas del Capital */
+              /* Tabla de Historial de Compras Descontadas del Capital (SOLO ADMIN) */
               <div>
                 {purchases.length === 0 ? (
                   <p className="text-sm text-gray-500">
-                    Aún no hay compras registradas con descuento de capital. Al registrar equipos o periféricos con la casilla marcada aparecerán aquí.
+                    Aún no hay compras registradas con descuento de capital.
                   </p>
                 ) : (
                   <div className="overflow-x-auto">
@@ -911,7 +978,7 @@ export default function Inventory() {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Editar Equipo / Componente</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Modifica los datos, precios o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
+              Modifica los datos o estado de <span className="font-semibold text-gray-800">{editingItem.name}</span>.
             </p>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">
@@ -956,29 +1023,33 @@ export default function Inventory() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={editCost}
-                    onChange={e => setEditCost(e.target.value)}
-                    required
-                    className="w-full border border-gray-300 p-2 rounded text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={editPrice}
-                    onChange={e => setEditPrice(e.target.value)}
-                    required
-                    className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
-                  />
-                </div>
+              <div className={`grid ${isAdmin ? 'grid-cols-3' : 'grid-cols-1'} gap-3`}>
+                {isAdmin && (
+                  <>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Costo ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editCost}
+                        onChange={e => setEditCost(e.target.value)}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Venta ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editPrice}
+                        onChange={e => setEditPrice(e.target.value)}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                      />
+                    </div>
+                  </>
+                )}
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Stock</label>
                   <input
@@ -1022,7 +1093,7 @@ export default function Inventory() {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-1">Mejorar / Repotenciar Equipo</h3>
             <p className="text-xs text-gray-500 mb-4">
-              Instala un componente de tu inventario en <span className="font-semibold text-gray-800">{baseEquipment.name}</span>. Se descontará del stock y se sumará al costo real.
+              Instala un componente de tu inventario en <span className="font-semibold text-gray-800">{baseEquipment.name}</span>. Se descontará automáticamente del stock disponible.
             </p>
 
             <form onSubmit={handleApplyUpgrade} className="space-y-4">
@@ -1037,7 +1108,7 @@ export default function Inventory() {
                   <option value="">-- Seleccionar pieza / componente --</option>
                   {availableComponents.map(comp => (
                     <option key={comp.id} value={comp.id}>
-                      [{comp.category}] {comp.name} (Stock: {comp.stock} | Costo: {currency} {comp.cost})
+                      [{comp.category}] {comp.name} (Stock: {comp.stock}{isAdmin ? ` | Costo: ${currency} ${comp.cost}` : ''})
                     </option>
                   ))}
                 </select>
@@ -1045,7 +1116,7 @@ export default function Inventory() {
 
               {selectedComponent && (
                 <>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className={`grid ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad a instalar</label>
                       <input
@@ -1058,12 +1129,14 @@ export default function Inventory() {
                         className="w-full border border-gray-300 p-2 rounded text-sm"
                       />
                     </div>
-                    <div className="bg-gray-50 p-2 rounded border border-gray-200 flex flex-col justify-center">
-                      <span className="text-[11px] text-gray-500 uppercase font-semibold">Nuevo Costo Total</span>
-                      <span className="text-base font-bold text-gray-900">
-                        {currency} {calculatedNewCost.toFixed(2)}
-                      </span>
-                    </div>
+                    {isAdmin && (
+                      <div className="bg-gray-50 p-2 rounded border border-gray-200 flex flex-col justify-center">
+                        <span className="text-[11px] text-gray-500 uppercase font-semibold">Nuevo Costo Total</span>
+                        <span className="text-base font-bold text-gray-900">
+                          {currency} {calculatedNewCost.toFixed(2)}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1077,17 +1150,19 @@ export default function Inventory() {
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Nuevo Precio de Venta ({currency})</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={newSalePrice}
-                      onChange={e => setNewSalePrice(e.target.value)}
-                      required
-                      className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
-                    />
-                  </div>
+                  {isAdmin && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Nuevo Precio de Venta ({currency})</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newSalePrice}
+                        onChange={e => setNewSalePrice(e.target.value)}
+                        required
+                        className="w-full border border-gray-300 p-2 rounded text-sm font-semibold text-green-700"
+                      />
+                    </div>
+                  )}
                 </>
               )}
 
