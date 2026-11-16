@@ -93,6 +93,7 @@ export default function Inventory() {
   const [baseEquipment, setBaseEquipment] = useState<Equipment | null>(null)
   const [selectedComponentId, setSelectedComponentId] = useState('')
   const [componentQty, setComponentQty] = useState(1)
+  const [unitsToUpgrade, setUnitsToUpgrade] = useState(1)
   const [newEquipmentName, setNewEquipmentName] = useState('')
   const [newSalePrice, setNewSalePrice] = useState('')
   const [upgrading, setUpgrading] = useState(false)
@@ -172,6 +173,11 @@ export default function Inventory() {
 
     if (!invRes.error && invRes.data) {
       setItems(invRes.data)
+      // Extract unique categories from existing items to ensure dynamic categories stay synced
+      const existingCats = Array.from(new Set(invRes.data.map((i: any) => i.category).filter(Boolean)))
+      if (existingCats.length > 0) {
+        setCategories(prev => Array.from(new Set([...prev, ...existingCats])))
+      }
     }
     if (settingsRes.data) {
       if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
@@ -477,7 +483,6 @@ export default function Inventory() {
     setUpdatingItem(false)
   }
 
-  // Apertura del modal de eliminación con opción de devolver componente al stock
   const openDeleteModal = (item: Equipment) => {
     setItemToDelete(item)
     setReturnComponentId('')
@@ -491,7 +496,6 @@ export default function Inventory() {
 
     setDeletingWithRestock(true)
     try {
-      // Si el usuario seleccionó un componente para devolver al stock
       if (returnComponentId) {
         const qtyToReturn = Math.max(1, Number(returnQuantity) || 1)
         const compItem = items.find(i => i.id === returnComponentId)
@@ -506,7 +510,6 @@ export default function Inventory() {
         }
       }
 
-      // Eliminar el equipo del inventario
       const { error: delErr } = await supabase
         .from('inventory')
         .delete()
@@ -528,6 +531,7 @@ export default function Inventory() {
     setBaseEquipment(equipment)
     setSelectedComponentId('')
     setComponentQty(1)
+    setUnitsToUpgrade(1)
     setNewEquipmentName(equipment.name)
     setNewSalePrice(equipment.price.toString())
     setUpgradeModalOpen(true)
@@ -566,21 +570,24 @@ export default function Inventory() {
     const component = items.find(i => i.id === selectedComponentId)
     if (!component) return
 
-    if (baseEquipment.stock < 1) {
-      alert('No hay stock disponible del equipo base para realizar la mejora.')
+    const upgradeCount = Math.max(1, Math.min(baseEquipment.stock, Number(unitsToUpgrade) || 1))
+    const totalComponentsNeeded = componentQty * upgradeCount
+
+    if (baseEquipment.stock < upgradeCount) {
+      alert('No hay stock suficiente del equipo base para realizar la mejora.')
       return
     }
 
-    if (component.stock < componentQty) {
-      alert(`Stock insuficiente del componente. Solo hay ${component.stock} unidades disponibles.`)
+    if (component.stock < totalComponentsNeeded) {
+      alert(`Stock insuficiente del componente. Se requieren ${totalComponentsNeeded} unidades pero solo hay ${component.stock} disponibles.`)
       return
     }
 
     setUpgrading(true)
     const { data: { user } } = await supabase.auth.getUser()
 
-    const addedCost = Number(component.cost) * componentQty
-    const finalCost = Number(baseEquipment.cost) + addedCost
+    const addedCostPerUnit = Number(component.cost) * componentQty
+    const finalCost = Number(baseEquipment.cost) + addedCostPerUnit
     const finalPrice = isAdmin
       ? (Number(newSalePrice) || Number(baseEquipment.price))
       : (Number(baseEquipment.price) + (Number(component.price) * componentQty))
@@ -588,12 +595,12 @@ export default function Inventory() {
     try {
       const { error: compError } = await supabase
         .from('inventory')
-        .update({ stock: component.stock - componentQty })
+        .update({ stock: component.stock - totalComponentsNeeded })
         .eq('id', component.id)
 
       if (compError) throw compError
 
-      if (baseEquipment.stock === 1) {
+      if (upgradeCount === baseEquipment.stock) {
         const { error: updateBaseError } = await supabase
           .from('inventory')
           .update({
@@ -608,7 +615,7 @@ export default function Inventory() {
       } else {
         const { error: decBaseError } = await supabase
           .from('inventory')
-          .update({ stock: baseEquipment.stock - 1 })
+          .update({ stock: baseEquipment.stock - upgradeCount })
           .eq('id', baseEquipment.id)
 
         if (decBaseError) throw decBaseError
@@ -622,7 +629,7 @@ export default function Inventory() {
               condition: 'Reacondicionado - Grado A',
               cost: finalCost,
               price: finalPrice,
-              stock: 1,
+              stock: upgradeCount,
               created_by: user?.id
             }
           ])
@@ -1178,7 +1185,7 @@ export default function Inventory() {
                                     Editar
                                   </button>
                                 )}
-                                {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 && (
+                                {(item.category === 'Laptops' || item.category === 'PCs de Escritorio' || item.category === 'Tablets') && item.stock > 0 && (
                                   <button
                                     onClick={() => openUpgradeModal(item)}
                                     title="Instalar RAM, SSD o componente del stock"
@@ -1535,6 +1542,21 @@ export default function Inventory() {
 
               {selectedComponent && (
                 <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Unidades a mejorar (Stock disponible: {baseEquipment.stock})
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max={baseEquipment.stock}
+                      value={unitsToUpgrade}
+                      onChange={e => setUnitsToUpgrade(Math.max(1, Math.min(baseEquipment.stock, Number(e.target.value) || 1)))}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-sm font-bold text-blue-800"
+                    />
+                  </div>
+
                   <div className={`grid ${canManageCost ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad a instalar</label>
