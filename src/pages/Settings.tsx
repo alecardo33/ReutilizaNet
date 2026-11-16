@@ -142,6 +142,23 @@ export default function Settings() {
     return Number(sale.total_amount) || 0
   }
 
+  const getPurchasePaidAmount = (p: any): number => {
+    if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
+      return Number(p.amount_paid)
+    }
+    const match = p.supplier?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    if (match) return Number(match[1])
+    if (p.payment_status === 'Pendiente' || p.supplier?.toLowerCase().includes('[crédito')) {
+      return 0
+    }
+    return Number(p.total_cost) || 0
+  }
+
+  const cleanSupplierName = (supplierStr?: string): string => {
+    if (!supplierStr) return 'Proveedor General'
+    return supplierStr.replace(/\s*\[Crédito[^\]]*\]/i, '').trim() || 'Proveedor General'
+  }
+
   const extractSerial = (sale: any): string => {
     if (sale.serial_number && sale.serial_number.trim() !== '') {
       return sale.serial_number.trim()
@@ -159,10 +176,11 @@ export default function Settings() {
     setMessage('')
 
     try {
-      const [invRes, salesRes, purchasesRes, profilesRes, settingsRes] = await Promise.all([
+      const [invRes, salesRes, purchasesRes, expensesRes, profilesRes, settingsRes] = await Promise.all([
         supabase.from('inventory').select('*').order('created_at', { ascending: false }),
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+        supabase.from('expenses').select('*').order('created_at', { ascending: false }),
         supabase.from('profiles').select('*').order('email', { ascending: true }),
         supabase.from('company_settings').select('*').eq('id', 1).single()
       ])
@@ -170,19 +188,27 @@ export default function Settings() {
       const invData = invRes.data || []
       const salesData = salesRes.data || []
       const purchasesData = purchasesRes.data || []
+      const expensesData = expensesRes.data || []
       const profilesData = profilesRes.data || []
       const cfg = settingsRes.data || form
 
       const cur = cfg.currency || 'Bs.'
       const capInicial = Number(cfg.initial_capital) || 0
-      const totalCompras = purchasesData.reduce((s, p) => s + Number(p.total_cost || 0), 0)
+      const totalComprasRegistradas = purchasesData.reduce((s, p) => s + Number(p.total_cost || 0), 0)
+      const totalComprasPagadas = purchasesData.reduce((s, p) => s + getPurchasePaidAmount(p), 0)
+      const totalCuentasPorPagar = Math.max(0, totalComprasRegistradas - totalComprasPagadas)
+
       const totalFacturado = salesData.reduce((s, v) => s + Number(v.total_amount || 0), 0)
       const totalCobrado = salesData.reduce((s, v) => s + getSalePaidAmount(v), 0)
       const totalPorCobrar = Math.max(0, totalFacturado - totalCobrado)
       const totalCostoVendido = salesData.reduce((s, v) => s + (Number(v.unit_cost || 0) * Number(v.quantity || 0)), 0)
-      const utilidadNeta = totalFacturado - totalCostoVendido
+      const margenBrutoVentas = totalFacturado - totalCostoVendido
+
+      const totalGastosOperativos = expensesData.reduce((s, g) => s + Number(g.amount || 0), 0)
+      const utilidadNetaReal = margenBrutoVentas - totalGastosOperativos
+
       const valorStock = invData.reduce((s, i) => s + (Number(i.cost || 0) * Number(i.stock || 0)), 0)
-      const liquidezCaja = capInicial - totalCompras + totalCobrado
+      const liquidezCaja = capInicial - totalComprasPagadas + totalCobrado - totalGastosOperativos
 
       const wb = XLSX.utils.book_new()
 
@@ -195,14 +221,17 @@ export default function Settings() {
         { Concepto: 'Fecha y Hora de Respaldo', Valor: new Date().toLocaleString() },
         { Concepto: 'Moneda', Valor: cur },
         { Concepto: `Capital Inicial (${cur})`, Valor: capInicial },
-        { Concepto: `Total Invertido en Compras (${cur})`, Valor: totalCompras },
-        { Concepto: `Saldo Remanente de Capital (${cur})`, Valor: capInicial - totalCompras },
+        { Concepto: `Total Compras Pagadas (${cur})`, Valor: totalComprasPagadas },
+        { Concepto: `Cuentas por Pagar Proveedores (${cur})`, Valor: totalCuentasPorPagar },
+        { Concepto: `Saldo Remanente de Capital (${cur})`, Valor: capInicial - totalComprasPagadas },
         { Concepto: `Total Facturado en Ventas (${cur})`, Valor: totalFacturado },
-        { Concepto: `Efectivo Real Cobrado (${cur})`, Valor: totalCobrado },
-        { Concepto: `Cuentas por Cobrar / Créditos (${cur})`, Valor: totalPorCobrar },
+        { Concepto: `Efectivo Real Cobrado en Ventas (${cur})`, Valor: totalCobrado },
+        { Concepto: `Cuentas por Cobrar Clientes (${cur})`, Valor: totalPorCobrar },
         { Concepto: `Costo Base de Equipos Vendidos (${cur})`, Valor: totalCostoVendido },
-        { Concepto: `Utilidad Neta Proyectada (${cur})`, Valor: utilidadNeta },
-        { Concepto: `Liquidez Total Disponible (${cur})`, Valor: liquidezCaja },
+        { Concepto: `Margen Bruto de Ventas (${cur})`, Valor: margenBrutoVentas },
+        { Concepto: `Gastos Operativos y Salarios (${cur})`, Valor: totalGastosOperativos },
+        { Concepto: `Utilidad Neta Real (${cur})`, Valor: utilidadNetaReal },
+        { Concepto: `Liquidez Real Disponible en Caja (${cur})`, Valor: liquidezCaja },
         { Concepto: `Valorización de Stock Actual (${cur})`, Valor: valorStock },
         { Concepto: 'Banco', Valor: cfg.bank_name || '' },
         { Concepto: 'Titular Cuenta', Valor: cfg.account_holder || '' },
@@ -210,7 +239,7 @@ export default function Settings() {
         { Concepto: 'Cláusula de Garantía', Valor: cfg.warranty_notes || '' }
       ]
       const wsSummary = XLSX.utils.json_to_sheet(summaryRows)
-      wsSummary['!cols'] = [{ wch: 38 }, { wch: 45 }]
+      wsSummary['!cols'] = [{ wch: 42 }, { wch: 45 }]
       XLSX.utils.book_append_sheet(wb, wsSummary, 'Resumen_y_Config')
 
       // Hoja 2: Inventario Actual
@@ -253,7 +282,7 @@ export default function Settings() {
           Estado_Pago: pending > 0.009 ? 'Pendiente' : 'Pagado',
           Detalle_Metodo_Pago: sale.payment_method || '',
           Costo_Base_Total: Number(costTotal.toFixed(2)),
-          Utilidad_Neta: Number((total - costTotal).toFixed(2))
+          Margen_Venta: Number((total - costTotal).toFixed(2))
         }
       })
       const wsSales = XLSX.utils.json_to_sheet(
@@ -266,34 +295,62 @@ export default function Settings() {
       ]
       XLSX.utils.book_append_sheet(wb, wsSales, 'Ventas_y_Creditos')
 
-      // Hoja 4: Compras de Equipos y Periféricos
-      const purchaseRows = purchasesData.map(p => ({
-        ID_Compra: p.id,
-        Fecha: p.created_at ? new Date(p.created_at).toLocaleString() : '',
-        Equipo_Periferico: p.item_name,
-        Categoria: p.category,
-        Proveedor: p.supplier || 'Proveedor General',
-        Cantidad: Number(p.quantity || 0),
-        Costo_Unitario: Number(p.unit_cost || 0),
-        Total_Invertido: Number(p.total_cost || 0)
-      }))
+      // Hoja 4: Compras de Equipos y Periféricos (Contado y Crédito)
+      const purchaseRows = purchasesData.map(p => {
+        const total = Number(p.total_cost || 0)
+        const paid = getPurchasePaidAmount(p)
+        const debt = Math.max(0, Number((total - paid).toFixed(2)))
+        return {
+          ID_Compra: p.id,
+          Fecha: p.created_at ? new Date(p.created_at).toLocaleString() : '',
+          Equipo_Periferico: p.item_name,
+          Categoria: p.category,
+          Proveedor: cleanSupplierName(p.supplier),
+          Cantidad: Number(p.quantity || 0),
+          Costo_Unitario: Number(p.unit_cost || 0),
+          Total_Compra: total,
+          Pagado_Capital: paid,
+          Saldo_Deuda: debt,
+          Estado: debt > 0.009 ? 'Crédito Pendiente' : 'Pagado'
+        }
+      })
       const wsPurchases = XLSX.utils.json_to_sheet(
         purchaseRows.length > 0 ? purchaseRows : [{ Mensaje: 'Sin compras registradas' }]
       )
       wsPurchases['!cols'] = [
         { wch: 36 }, { wch: 22 }, { wch: 32 }, { wch: 18 },
-        { wch: 24 }, { wch: 10 }, { wch: 15 }, { wch: 16 }
+        { wch: 24 }, { wch: 10 }, { wch: 15 }, { wch: 15 },
+        { wch: 15 }, { wch: 15 }, { wch: 18 }
       ]
       XLSX.utils.book_append_sheet(wb, wsPurchases, 'Compras')
 
-      // Hoja 5: Kardex Consolidado (Entradas y Salidas)
+      // Hoja 5: Gastos Operativos y Salarios
+      const expenseRows = expensesData.map(exp => ({
+        ID_Gasto: exp.id,
+        Fecha_Hora: exp.created_at ? new Date(exp.created_at).toLocaleString() : '',
+        Categoria: exp.category,
+        Descripcion: exp.description,
+        Observacion_Beneficiario: exp.notes || '',
+        Metodo_Pago: exp.payment_method || 'Efectivo (Caja)',
+        Monto: Number(exp.amount || 0)
+      }))
+      const wsExpenses = XLSX.utils.json_to_sheet(
+        expenseRows.length > 0 ? expenseRows : [{ Mensaje: 'Sin gastos operativos registrados' }]
+      )
+      wsExpenses['!cols'] = [
+        { wch: 36 }, { wch: 22 }, { wch: 26 }, { wch: 34 },
+        { wch: 30 }, { wch: 18 }, { wch: 15 }
+      ]
+      XLSX.utils.book_append_sheet(wb, wsExpenses, 'Gastos_y_Salarios')
+
+      // Hoja 6: Kardex Consolidado (Entradas y Salidas)
       const rawKardex: any[] = []
       purchasesData.forEach(p => {
         rawKardex.push({
           rawDate: p.created_at,
           Tipo: 'ENTRADA (Compra)',
           Item: p.item_name,
-          Detalle_Serie: `Proveedor: ${p.supplier || 'General'}`,
+          Detalle_Serie: `Proveedor: ${cleanSupplierName(p.supplier)}`,
           Entrada: Number(p.quantity || 0),
           Salida: 0,
           Monto: Number(p.total_cost || 0)
@@ -337,7 +394,7 @@ export default function Settings() {
       ]
       XLSX.utils.book_append_sheet(wb, wsKardex, 'Kardex')
 
-      // Hoja 6: Usuarios y Roles
+      // Hoja 7: Usuarios y Roles
       const userRows = profilesData.map(u => ({
         ID_Usuario: u.id,
         Nombre_Completo: u.full_name || '',
@@ -412,10 +469,10 @@ export default function Settings() {
               <div className="max-w-2xl">
                 <h2 className="text-lg font-bold text-gray-800">Copia de Seguridad Completa (Excel .xlsx)</h2>
                 <p className="text-xs text-gray-600 mt-1">
-                  Descarga un archivo Excel con 6 pestañas organizadas: <span className="font-semibold">Resumen y Capital</span>,{' '}
+                  Descarga un archivo Excel con 7 pestañas organizadas: <span className="font-semibold">Resumen y Capital</span>,{' '}
                   <span className="font-semibold">Inventario</span>, <span className="font-semibold">Ventas y Créditos</span>,{' '}
-                  <span className="font-semibold">Compras</span>, <span className="font-semibold">Kardex</span> y{' '}
-                  <span className="font-semibold">Usuarios</span>.
+                  <span className="font-semibold">Compras</span>, <span className="font-semibold">Gastos y Salarios</span>,{' '}
+                  <span className="font-semibold">Kardex</span> y <span className="font-semibold">Usuarios</span>.
                 </p>
               </div>
               <button
@@ -433,7 +490,7 @@ export default function Settings() {
               <div className="bg-white p-6 rounded-lg shadow border-l-4 border-emerald-600">
                 <h2 className="text-lg font-bold text-gray-800 mb-1">Capital Inicial de Operaciones</h2>
                 <p className="text-xs text-gray-500 mb-4">
-                  Define el fondo de capital inicial de tu negocio. Cada compra de equipos, repuestos o periféricos registrada en Inventario se descontará automáticamente de este fondo, y tus ventas cobradas lo incrementarán.
+                  Define el fondo de capital inicial de tu negocio. Cada compra pagada se descontará de este fondo, mientras que las compras a crédito no lo afectarán hasta que registres el pago.
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
