@@ -1,0 +1,276 @@
+PS C:\PROGRAMAS\repuestos-app-fase3> Get-Content ".\supabase\migrations\repuestos_ventas_17_6_6_revision2.sql" -Raw
+-- REPUESTOS-APP / FASE 3 / PASO 17.6.6 / REVISION 2
+-- REVISAR ANTES DE EJECUTAR en Supabase SQL Editor.
+-- DiseÃ±ado para una primera instalaciÃ³n; no ejecutar sobre tablas sales existentes.
+-- Primera versiÃ³n: ventas totalmente pagadas en efectivo, QR o combinaciÃ³n.
+-- Requiere las tablas y funciones existentes descritas en el proyecto.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.sales (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL UNIQUE,
+  request_payload jsonb NOT NULL,
+  branch_id uuid NOT NULL REFERENCES public.branches(id) ON DELETE RESTRICT,
+  customer_id uuid REFERENCES public.customers(id) ON DELETE RESTRICT,
+  sold_by uuid NOT NULL REFERENCES auth.users(id),
+  customer_type text NOT NULL CHECK (customer_type IN ('minorista','mayorista')),
+  total numeric(14,2) NOT NULL CHECK (total > 0),
+  status text NOT NULL DEFAULT 'completed' CHECK (status IN ('completed','cancelled')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  cancelled_at timestamptz,
+  cancelled_by uuid REFERENCES auth.users(id),
+  cancellation_reason text,
+  CONSTRAINT sales_cancel_state_check CHECK (
+    (status = 'completed' AND cancelled_at IS NULL AND cancelled_by IS NULL AND cancellation_reason IS NULL)
+    OR
+    (status = 'cancelled' AND cancelled_at IS NOT NULL AND cancelled_by IS NOT NULL AND length(btrim(cancellation_reason)) BETWEEN 3 AND 500)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS public.sale_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid NOT NULL REFERENCES public.sales(id) ON DELETE RESTRICT,
+  product_id uuid NOT NULL REFERENCES public.products(id) ON DELETE RESTRICT,
+  quantity numeric(14,3) NOT NULL CHECK (quantity > 0),
+  unit_price numeric(14,2) NOT NULL CHECK (unit_price >= 0),
+  subtotal numeric(14,2) NOT NULL CHECK (subtotal = round(quantity * unit_price, 2) AND subtotal >= 0),
+  UNIQUE(sale_id, product_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.sale_payments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid NOT NULL REFERENCES public.sales(id) ON DELETE RESTRICT,
+  method text NOT NULL CHECK (method IN ('efectivo','qr')),
+  amount numeric(14,2) NOT NULL CHECK (amount > 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(sale_id, method)
+);
+
+CREATE INDEX IF NOT EXISTS sales_branch_created_idx ON public.sales(branch_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS sales_customer_idx ON public.sales(customer_id);
+CREATE INDEX IF NOT EXISTS sale_items_product_idx ON public.sale_items(product_id);
+
+ALTER TABLE public.sales ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sale_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sale_payments ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.sales, public.sale_items, public.sale_payments FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.sales, public.sale_items, public.sale_payments TO authenticated;
+GRANT ALL ON public.sales, public.sale_items, public.sale_payments TO service_role;
+
+CREATE POLICY sales_read_authorized ON public.sales FOR SELECT TO authenticated
+  USING (public.is_active_user() AND EXISTS (
+    SELECT 1 FROM public.profiles r WHERE r.id = (SELECT auth.uid())
+      AND r.role IN ('admin','ventas','contabilidad')
+  ) AND (public.is_admin() OR EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = (SELECT auth.uid()) AND p.branch_id = sales.branch_id
+  )));
+CREATE POLICY sale_items_read_authorized ON public.sale_items FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM public.sales s WHERE s.id = sale_items.sale_id));
+CREATE POLICY sale_payments_read_authorized ON public.sale_payments FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM public.sales s WHERE s.id = sale_payments.sale_id));
+
+CREATE OR REPLACE FUNCTION public.register_sale(
+  p_request_id uuid, p_branch_id uuid, p_customer_id uuid,
+  p_items jsonb, p_payments jsonb
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $function$
+DECLARE
+  v_uid uuid := (SELECT auth.uid());
+  v_role text;
+  v_user_branch uuid;
+  v_customer_type text := 'minorista';
+  v_existing public.sales%ROWTYPE;
+  v_payload jsonb;
+  v_sale_id uuid;
+  v_item record;
+  v_payment record;
+  v_price numeric(14,2);
+  v_subtotal numeric(14,2);
+  v_total numeric(14,2) := 0;
+  v_paid numeric(14,2) := 0;
+  v_before numeric(14,3);
+  v_after numeric(14,3);
+  v_count int := 0;
+  v_payment_count int := 0;
+BEGIN
+  IF v_uid IS NULL OR NOT public.is_active_user() THEN RAISE EXCEPTION 'No autorizado'; END IF;
+  SELECT role, branch_id INTO v_role, v_user_branch FROM public.profiles WHERE id = v_uid;
+  IF v_role NOT IN ('admin','ventas') THEN RAISE EXCEPTION 'Rol no autorizado para vender'; END IF;
+  IF p_request_id IS NULL OR p_branch_id IS NULL OR jsonb_typeof(p_items) IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_payments) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'Solicitud invalida';
+  END IF;
+  -- Almacenar la solicitud exacta para rechazar reintentos con datos diferentes.
+  v_payload := pg_catalog.jsonb_build_object(
+    'branch_id', p_branch_id, 'customer_id', p_customer_id,
+    'items', p_items, 'payments', p_payments
+  );
+  -- El bloqueo serializa reintentos con el mismo request_id incluso si llegan a la vez.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_request_id::text, 0));
+  SELECT * INTO v_existing FROM public.sales WHERE request_id = p_request_id;
+  IF FOUND THEN
+    IF v_existing.sold_by <> v_uid OR v_existing.branch_id <> p_branch_id OR
+       v_existing.customer_id IS DISTINCT FROM p_customer_id OR
+       v_existing.request_payload IS DISTINCT FROM v_payload THEN
+      RAISE EXCEPTION 'Identificador de solicitud ya utilizado';
+    END IF;
+    RETURN v_existing.id;
+  END IF;
+  IF v_role <> 'admin' AND v_user_branch IS DISTINCT FROM p_branch_id THEN
+    RAISE EXCEPTION 'Sucursal no autorizada';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.branches WHERE id = p_branch_id AND is_active) THEN
+    RAISE EXCEPTION 'Sucursal inactiva o inexistente';
+  END IF;
+  IF p_customer_id IS NOT NULL THEN
+    SELECT customer_type INTO v_customer_type FROM public.customers
+    WHERE id = p_customer_id AND is_active;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Cliente no disponible'; END IF;
+  END IF;
+  IF jsonb_array_length(p_items) NOT BETWEEN 1 AND 100 OR
+     jsonb_array_length(p_payments) NOT BETWEEN 1 AND 2 THEN
+    RAISE EXCEPTION 'Cantidad de lineas o pagos invalida';
+  END IF;
+  -- ValidaciÃ³n completa y suma de precios del servidor antes de escribir.
+  FOR v_item IN
+    SELECT x.product_id, x.quantity FROM jsonb_to_recordset(p_items)
+      AS x(product_id uuid, quantity numeric)
+  LOOP
+    v_count := v_count + 1;
+    IF v_item.product_id IS NULL OR v_item.quantity IS NULL OR v_item.quantity <= 0
+       OR v_item.quantity <> round(v_item.quantity,3) OR v_item.quantity > 99999999999.999 THEN
+      RAISE EXCEPTION 'Producto o cantidad invalida';
+    END IF;
+    SELECT CASE WHEN v_customer_type = 'mayorista' THEN wholesale_price ELSE retail_price END
+      INTO v_price FROM public.products WHERE id = v_item.product_id AND is_active FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Producto inactivo o inexistente'; END IF;
+    v_subtotal := round(v_item.quantity * v_price, 2);
+    IF v_subtotal <= 0 THEN RAISE EXCEPTION 'Subtotal debe ser positivo'; END IF;
+    v_total := v_total + v_subtotal;
+    IF v_total > 999999999999.99 THEN
+      RAISE EXCEPTION 'Total excede limite permitido';
+    END IF;
+  END LOOP;
+  IF v_count <> jsonb_array_length(p_items) OR v_total > 999999999999.99 THEN
+    RAISE EXCEPTION 'Detalle de venta invalido';
+  END IF;
+  IF (SELECT count(DISTINCT x.product_id) FROM jsonb_to_recordset(p_items)
+      AS x(product_id uuid)) <> v_count THEN
+    RAISE EXCEPTION 'Productos duplicados en la venta';
+  END IF;
+  FOR v_payment IN SELECT x.method, x.amount FROM jsonb_to_recordset(p_payments)
+    AS x(method text, amount numeric)
+  LOOP
+    v_payment_count := v_payment_count + 1;
+    IF v_payment.method NOT IN ('efectivo','qr') OR v_payment.method IS NULL OR
+       v_payment.amount IS NULL OR v_payment.amount <= 0 OR
+       v_payment.amount <> round(v_payment.amount,2) THEN
+      RAISE EXCEPTION 'Pago invalido';
+    END IF;
+    v_paid := v_paid + v_payment.amount;
+    IF v_paid > 999999999999.99 THEN
+      RAISE EXCEPTION 'Pago excede limite permitido';
+    END IF;
+  END LOOP;
+  IF v_payment_count <> jsonb_array_length(p_payments) OR v_paid <> v_total OR
+     (SELECT count(DISTINCT x.method) FROM jsonb_to_recordset(p_payments)
+       AS x(method text)) <> v_payment_count THEN
+    RAISE EXCEPTION 'Pagos duplicados o suma diferente al total';
+  END IF;
+
+  INSERT INTO public.sales(request_id,request_payload,branch_id,customer_id,sold_by,customer_type,total)
+  VALUES(p_request_id,v_payload,p_branch_id,p_customer_id,v_uid,v_customer_type,v_total)
+  RETURNING id INTO v_sale_id;
+
+  -- Los precios leÃ­dos con FOR SHARE permanecen bloqueados hasta el fin de la transacciÃ³n.
+  -- Orden determinista de productos para reducir interbloqueos entre ventas concurrentes.
+  FOR v_item IN
+    SELECT x.product_id, x.quantity FROM jsonb_to_recordset(p_items)
+      AS x(product_id uuid, quantity numeric) ORDER BY x.product_id
+  LOOP
+    SELECT CASE WHEN v_customer_type = 'mayorista' THEN wholesale_price ELSE retail_price END
+      INTO v_price FROM public.products WHERE id = v_item.product_id AND is_active FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Producto no disponible'; END IF;
+    INSERT INTO public.inventory(product_id,branch_id,quantity)
+      VALUES(v_item.product_id,p_branch_id,0)
+      ON CONFLICT (product_id,branch_id) DO NOTHING;
+    SELECT quantity INTO STRICT v_before FROM public.inventory
+      WHERE product_id=v_item.product_id AND branch_id=p_branch_id FOR UPDATE;
+    v_after := v_before - v_item.quantity;
+    IF v_after < 0 THEN RAISE EXCEPTION 'Stock insuficiente para producto %', v_item.product_id; END IF;
+    UPDATE public.inventory SET quantity=v_after, updated_at=now()
+      WHERE product_id=v_item.product_id AND branch_id=p_branch_id;
+    INSERT INTO public.sale_items(sale_id,product_id,quantity,unit_price,subtotal)
+      VALUES(v_sale_id,v_item.product_id,v_item.quantity,v_price,round(v_item.quantity*v_price,2));
+    INSERT INTO public.inventory_movements
+      (product_id,branch_id,movement_type,quantity_change,quantity_before,quantity_after,reason,performed_by)
+      VALUES(v_item.product_id,p_branch_id,'salida',-v_item.quantity,v_before,v_after,
+             'Venta ' || v_sale_id::text,v_uid);
+  END LOOP;
+  FOR v_payment IN SELECT x.method, x.amount FROM jsonb_to_recordset(p_payments)
+    AS x(method text, amount numeric)
+  LOOP
+    INSERT INTO public.sale_payments(sale_id,method,amount)
+      VALUES(v_sale_id,v_payment.method,v_payment.amount);
+  END LOOP;
+  RETURN v_sale_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.cancel_sale(p_sale_id uuid, p_reason text)
+RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $function$
+DECLARE
+  v_uid uuid := (SELECT auth.uid());
+  v_sale public.sales%ROWTYPE;
+  v_item record;
+  v_before numeric(14,3);
+  v_after numeric(14,3);
+BEGIN
+  IF v_uid IS NULL OR NOT public.is_admin() OR NOT public.is_active_user() THEN
+    RAISE EXCEPTION 'Solo el administrador puede anular ventas';
+  END IF;
+  IF p_sale_id IS NULL OR p_reason IS NULL OR length(pg_catalog.btrim(p_reason)) NOT BETWEEN 3 AND 500 THEN
+    RAISE EXCEPTION 'Datos de anulacion invalidos';
+  END IF;
+  SELECT * INTO v_sale FROM public.sales WHERE id=p_sale_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Venta inexistente'; END IF;
+  IF v_sale.status <> 'completed' THEN RAISE EXCEPTION 'Venta ya anulada'; END IF;
+  FOR v_item IN SELECT product_id,quantity FROM public.sale_items
+    WHERE sale_id=p_sale_id ORDER BY product_id
+  LOOP
+    SELECT quantity INTO STRICT v_before FROM public.inventory
+      WHERE product_id=v_item.product_id AND branch_id=v_sale.branch_id FOR UPDATE;
+    v_after := v_before + v_item.quantity;
+    IF v_after > 99999999999.999 THEN RAISE EXCEPTION 'Stock excede limite'; END IF;
+    UPDATE public.inventory SET quantity=v_after,updated_at=now()
+      WHERE product_id=v_item.product_id AND branch_id=v_sale.branch_id;
+    INSERT INTO public.inventory_movements
+      (product_id,branch_id,movement_type,quantity_change,quantity_before,quantity_after,reason,performed_by)
+      VALUES(v_item.product_id,v_sale.branch_id,'entrada',v_item.quantity,v_before,v_after,
+             'Anulacion venta ' || p_sale_id::text,v_uid);
+  END LOOP;
+  UPDATE public.sales SET status='cancelled',cancelled_at=now(),cancelled_by=v_uid,
+    cancellation_reason=pg_catalog.btrim(p_reason) WHERE id=p_sale_id;
+  RETURN p_sale_id;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.register_sale(uuid,uuid,uuid,jsonb,jsonb) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.cancel_sale(uuid,text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.register_sale(uuid,uuid,uuid,jsonb,jsonb) TO authenticated,service_role;
+GRANT EXECUTE ON FUNCTION public.cancel_sale(uuid,text) TO authenticated,service_role;
+
+CREATE TRIGGER audit_sales AFTER INSERT OR UPDATE ON public.sales
+FOR EACH ROW EXECUTE FUNCTION public.audit_row_change();
+
+-- Las tablas de detalle y pago son inmutables para usuarios de la aplicaciÃ³n.
+-- La auditorÃ­a de la venta conserva el usuario, sucursal y estado;
+-- el detalle y los pagos permanecen vinculados mediante sale_id.
+
+
+COMMIT;
+
+PS C:\PROGRAMAS\repuestos-app-fase3>
