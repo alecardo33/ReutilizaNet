@@ -826,6 +826,9 @@ export default function Inventory() {
                 <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
                   Inicio
                 </button>
+                <button onClick={() => navigate('/store')} className="bg-amber-600 text-white px-4 py-2 rounded text-sm hover:bg-amber-700">
+                  Tienda
+                </button>
                 <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
                   Ir a Caja
                 </button>
