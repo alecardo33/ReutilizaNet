@@ -7,7 +7,7 @@ export default function AdminUsers() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
-  const [role, setRole] = useState<'admin' | 'staff' | 'client'>('staff')
+  const [role, setRole] = useState<'admin' | 'technician' | 'seller'>('technician')
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
 
@@ -30,8 +30,12 @@ export default function AdminUsers() {
       if (data.user) {
         const { error: profileError } = await supabase
           .from('profiles')
-          .update({ role, full_name: fullName })
-          .eq('id', data.user.id)
+          .upsert({
+            id: data.user.id,
+            email,
+            role,
+            full_name: fullName
+          })
 
         if (profileError) throw profileError
 
@@ -119,12 +123,12 @@ export default function AdminUsers() {
               <label className="block text-sm font-medium text-gray-700 mb-1">Rol del Sistema</label>
               <select
                 value={role}
-                onChange={(e) => setRole(e.target.value as any)}
+                onChange={(e) => setRole(e.target.value as 'admin' | 'technician' | 'seller')}
                 className="w-full border border-gray-300 p-2 rounded text-sm bg-white"
               >
-                <option value="staff">Staff / Técnico</option>
-                <option value="admin">Administrador</option>
-                <option value="client">Cliente</option>
+                <option value="technician">Técnico (Acceso a Inventario y Taller)</option>
+                <option value="seller">Vendedor (Acceso a Caja y Ventas)</option>
+                <option value="admin">Administrador (Acceso Total)</option>
               </select>
             </div>
             <button
@@ -134,7 +138,11 @@ export default function AdminUsers() {
             >
               {loading ? 'Creando usuario...' : 'Crear Usuario'}
             </button>
-            {message && <p className="text-sm mt-2 text-center font-medium text-gray-700">{message}</p>}
+            {message && (
+              <p className={`text-sm mt-2 text-center font-medium ${message.startsWith('Error') ? 'text-red-600' : 'text-green-700'}`}>
+                {message}
+              </p>
+            )}
           </form>
         </div>
       </div>
