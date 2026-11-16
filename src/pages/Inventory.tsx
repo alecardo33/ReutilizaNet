@@ -1112,13 +1112,15 @@ export default function Inventory() {
                             </td>
                             <td className="p-3">
                               <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => openEditModal(item)}
-                                  title="Editar equipo o estado"
-                                  className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
-                                >
-                                  Editar
-                                </button>
+                                {isAdmin && (
+                                  <button
+                                    onClick={() => openEditModal(item)}
+                                    title="Editar equipo o estado"
+                                    className="bg-blue-100 hover:bg-blue-200 text-blue-800 text-xs font-semibold px-2 py-1 rounded transition"
+                                  >
+                                    Editar
+                                  </button>
+                                )}
                                 {(item.category === 'Laptops' || item.category === 'PCs de Escritorio') && item.stock > 0 && (
                                   <button
                                     onClick={() => openUpgradeModal(item)}
