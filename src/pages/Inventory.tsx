@@ -105,6 +105,16 @@ export default function Inventory() {
   const [returnQuantity, setReturnQuantity] = useState('1')
   const [deletingWithRestock, setDeletingWithRestock] = useState(false)
 
+  // Modal de Deshacer Mejora (Undo Upgrade)
+  const [undoModalOpen, setUndoModalOpen] = useState(false)
+  const [itemToUndo, setItemToUndo] = useState<Equipment | null>(null)
+  const [undoUnits, setUndoUnits] = useState(1)
+  const [returnCompId, setReturnCompId] = useState('')
+  const [returnCompQtyPerUnit, setReturnCompQtyPerUnit] = useState(1)
+  const [targetBaseId, setTargetBaseId] = useState('')
+  const [baseItemNameInput, setBaseItemNameInput] = useState('')
+  const [undoing, setUndoing] = useState(false)
+
   useEffect(() => {
     fetchInventoryAndCapital()
   }, [])
@@ -644,6 +654,101 @@ export default function Inventory() {
       alert('Error al procesar la mejora del equipo: ' + err.message)
     } finally {
       setUpgrading(false)
+    }
+  }
+
+    const openUndoModal = (item: Equipment) => {
+    setItemToUndo(item)
+    setUndoUnits(1)
+    setReturnCompId('')
+    setReturnCompQtyPerUnit(1)
+    setTargetBaseId('')
+    // Suggest base item name by removing '+ ...' from upgraded item name if present
+    const baseGuess = item.name.split('+')[0].trim()
+    setBaseItemNameInput(baseGuess)
+    setUndoModalOpen(true)
+  }
+
+  const handleConfirmUndoUpgrade = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!itemToUndo) return
+
+    const unitsCount = Math.max(1, Math.min(itemToUndo.stock, Number(undoUnits) || 1))
+    setUndoing(true)
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+
+      // 1. Return component to stock if selected
+      if (returnCompId) {
+        const compItem = items.find(i => i.id === returnCompId)
+        if (compItem) {
+          const totalCompReturn = Number(returnCompQtyPerUnit || 1) * unitsCount
+          const newCompStock = compItem.stock + totalCompReturn
+          const { error: compUpdErr } = await supabase
+            .from('inventory')
+            .update({ stock: newCompStock })
+            .eq('id', compItem.id)
+          if (compUpdErr) throw compUpdErr
+        }
+      }
+
+      // 2. Reduce or delete the upgraded item stock
+      const newUpgradedStock = itemToUndo.stock - unitsCount
+      if (newUpgradedStock > 0) {
+        const { error: updErr } = await supabase
+          .from('inventory')
+          .update({ stock: newUpgradedStock })
+          .eq('id', itemToUndo.id)
+        if (updErr) throw updErr
+      } else {
+        const { error: delErr } = await supabase
+          .from('inventory')
+          .delete()
+          .eq('id', itemToUndo.id)
+        if (delErr) throw delErr
+      }
+
+      // 3. Restore or increment base item stock
+      if (targetBaseId) {
+        const baseIt = items.find(i => i.id === targetBaseId)
+        if (baseIt) {
+          const newBaseStock = baseIt.stock + unitsCount
+          const { error: baseUpdErr } = await supabase
+            .from('inventory')
+            .update({ stock: newBaseStock })
+            .eq('id', baseIt.id)
+          if (baseUpdErr) throw baseUpdErr
+        }
+      } else {
+        // Create new base item or restock
+        const baseName = baseItemNameInput.trim() || itemToUndo.name.split('+')[0].trim() || 'Equipo Base'
+        const estimatedBaseCost = Math.max(0, Number(itemToUndo.cost) * 0.8) // approximate base cost
+        const estimatedBasePrice = Math.max(0, Number(itemToUndo.price) * 0.8)
+
+        const { error: insBaseErr } = await supabase
+          .from('inventory')
+          .insert([
+            {
+              name: baseName,
+              category: itemToUndo.category,
+              condition: itemToUndo.condition,
+              cost: estimatedBaseCost,
+              price: estimatedBasePrice,
+              stock: unitsCount,
+              created_by: user?.id
+            }
+          ])
+        if (insBaseErr) throw insBaseErr
+      }
+
+      setUndoModalOpen(false)
+      setItemToUndo(null)
+      await fetchInventoryAndCapital()
+    } catch (err: any) {
+      alert('Error al deshacer mejora: ' + err.message)
+    } finally {
+      setUndoing(false)
     }
   }
 
@@ -1194,6 +1299,15 @@ export default function Inventory() {
                                     + Mejorar
                                   </button>
                                 )}
+                                {item.name.includes('+') && item.stock > 0 && (
+                                  <button
+                                    onClick={() => openUndoModal(item)}
+                                    title="Deshacer mejora / desarmar equipo y devolver componente"
+                                    className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold px-2 py-1 rounded transition"
+                                  >
+                                    Deshacer
+                                  </button>
+                                )}
                                 {isAdmin && (
                                   <button
                                     onClick={() => openDeleteModal(item)}
@@ -1507,6 +1621,127 @@ export default function Inventory() {
                   className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 font-semibold"
                 >
                   {deletingWithRestock ? 'Eliminando...' : 'Confirmar Eliminación'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Deshacer Mejora */}
+      {undoModalOpen && itemToUndo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Deshacer Mejora / Revertir Ensamblaje</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Estás deshaciendo mejoras en <span className="font-semibold text-gray-800">{itemToUndo.name}</span> (Stock actual: {itemToUndo.stock}).
+            </p>
+
+            <form onSubmit={handleConfirmUndoUpgrade} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Unidades a deshacer / desarmar
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max={itemToUndo.stock}
+                  value={undoUnits}
+                  onChange={e => setUndoUnits(Math.max(1, Math.min(itemToUndo.stock, Number(e.target.value) || 1)))}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm font-bold text-purple-900 bg-purple-50"
+                />
+              </div>
+
+              <div className="bg-gray-50 border border-gray-200 p-3 rounded-lg space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-800 mb-1">
+                    Componente a devolver al inventario (Opcional)
+                  </label>
+                  <select
+                    value={returnCompId}
+                    onChange={e => setReturnCompId(e.target.value)}
+                    className="w-full border border-gray-300 p-2 rounded text-xs bg-white font-medium"
+                  >
+                    <option value="">-- No devolver componente --</option>
+                    {items.map(it => (
+                      <option key={it.id} value={it.id}>
+                        [{it.category}] {it.name} (Stock: {it.stock})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {returnCompId && (
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      Cantidad de unidades de componente por equipo desarmado
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={returnCompQtyPerUnit}
+                      onChange={e => setReturnCompQtyPerUnit(Math.max(1, Number(e.target.value) || 1))}
+                      required
+                      className="w-full border border-gray-300 p-2 rounded text-xs bg-white font-bold"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-blue-900 mb-1">
+                    Restaurar stock al equipo base (Opcional)
+                  </label>
+                  <select
+                    value={targetBaseId}
+                    onChange={e => setTargetBaseId(e.target.value)}
+                    className="w-full border border-blue-300 p-2 rounded text-xs bg-white font-medium"
+                  >
+                    <option value="">-- Crear / Restaurar como nuevo ítem base --</option>
+                    {items.filter(i => i.id !== itemToUndo.id).map(it => (
+                      <option key={it.id} value={it.id}>
+                        [{it.category}] {it.name} (Stock: {it.stock})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {!targetBaseId && (
+                  <div>
+                    <label className="block text-xs font-semibold text-blue-900 mb-1">
+                      Nombre del equipo base restaurado
+                    </label>
+                    <input
+                      type="text"
+                      value={baseItemNameInput}
+                      onChange={e => setBaseItemNameInput(e.target.value)}
+                      required
+                      placeholder="Ej: ThinkPad T480"
+                      className="w-full border border-blue-300 p-2 rounded text-xs bg-white font-bold"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUndoModalOpen(false)
+                    setItemToUndo(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={undoing}
+                  className="px-4 py-2 bg-purple-600 text-white rounded text-sm hover:bg-purple-700 font-semibold"
+                >
+                  {undoing ? 'Procesando...' : 'Confirmar Deshacer Mejora'}
                 </button>
               </div>
             </form>
