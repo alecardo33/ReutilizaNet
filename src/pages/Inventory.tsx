@@ -52,7 +52,7 @@ export default function Inventory() {
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('1')
 
-  // Modalidad de pago de compra: 'cash' (Descuenta capital), 'credit' (A crédito - Cuentas por Pagar), 'none' (Ingreso sin afectación)
+  // Modalidad de pago de compra
   const [purchasePaymentType, setPurchasePaymentType] = useState<'cash' | 'credit' | 'none'>('cash')
   const [initialSupplierDeposit, setInitialSupplierDeposit] = useState('')
 
@@ -61,6 +61,16 @@ export default function Inventory() {
   const [targetCreditPurchase, setTargetCreditPurchase] = useState<PurchaseRecord | null>(null)
   const [supplierInstallmentAmount, setSupplierInstallmentAmount] = useState('')
   const [savingSupplierPayment, setSavingSupplierPayment] = useState(false)
+
+  // Modal para EDITAR una Compra registrada (corrige cantidad, costo, nombre y capital)
+  const [editPurchaseModalOpen, setEditPurchaseModalOpen] = useState(false)
+  const [editingPurchase, setEditingPurchase] = useState<PurchaseRecord | null>(null)
+  const [editPurItemName, setEditPurItemName] = useState('')
+  const [editPurSupplier, setEditPurSupplier] = useState('')
+  const [editPurQty, setEditPurQty] = useState('1')
+  const [editPurUnitCost, setEditPurUnitCost] = useState('0')
+  const [editPurSyncStock, setEditPurSyncStock] = useState(true)
+  const [updatingPurchase, setUpdatingPurchase] = useState(false)
 
   // Filtros y búsqueda de inventario
   const [searchTerm, setSearchTerm] = useState('')
@@ -94,7 +104,6 @@ export default function Inventory() {
 
   const isAdmin = userRole === 'admin'
 
-  // Helpers para interpretar pagos y saldos de compras a crédito
   const getPurchasePaidAmount = (p: PurchaseRecord): number => {
     if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
       return Number(p.amount_paid)
@@ -262,7 +271,6 @@ export default function Inventory() {
         if (updErr) throw updErr
       }
 
-      // Registrar en historial de compras si es contado o crédito (si es 'none' no afecta capital ni deudas)
       if (isAdmin && purchasePaymentType !== 'none' && totalPurchaseCost > 0) {
         const pendingDebt = Number((totalPurchaseCost - depositNum).toFixed(2))
         const baseSupplier = supplier.trim() || 'Proveedor General'
@@ -313,7 +321,103 @@ export default function Inventory() {
     }
   }
 
-  // Abrir modal para pagar o abonar una compra a crédito a proveedor
+  // Abrir modal para editar un registro de compra
+  const openEditPurchaseModal = (p: PurchaseRecord) => {
+    setEditingPurchase(p)
+    setEditPurItemName(p.item_name)
+    setEditPurSupplier(cleanSupplierName(p.supplier))
+    setEditPurQty(p.quantity.toString())
+    setEditPurUnitCost(p.unit_cost.toString())
+    setEditPurSyncStock(true)
+    setEditPurchaseModalOpen(true)
+  }
+
+  const handleSavePurchaseEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingPurchase || !editPurItemName.trim()) return
+
+    const newQty = Math.max(1, Number(editPurQty) || 1)
+    const newUnitCost = Math.max(0, Number(editPurUnitCost) || 0)
+    const newTotalCost = Number((newQty * newUnitCost).toFixed(2))
+    const oldPaid = getPurchasePaidAmount(editingPurchase)
+    const wasCredit = getPurchasePendingDebt(editingPurchase) > 0.009 || editingPurchase.supplier?.toLowerCase().includes('[crédito')
+
+    const newPaid = wasCredit ? Math.min(newTotalCost, oldPaid) : newTotalCost
+    const newDebt = Number(Math.max(0, newTotalCost - newPaid).toFixed(2))
+    const cleanSup = editPurSupplier.trim() || 'Proveedor General'
+    const updatedSupplierText = wasCredit
+      ? newDebt > 0.009
+        ? `${cleanSup} [Crédito - Pagado: ${newPaid.toFixed(2)} | Saldo: ${newDebt.toFixed(2)}]`
+        : `${cleanSup} [Crédito Cancelado - Pagado: ${newPaid.toFixed(2)}]`
+      : cleanSup
+
+    setUpdatingPurchase(true)
+    try {
+      const extUpd = await supabase
+        .from('purchases')
+        .update({
+          item_name: editPurItemName.trim(),
+          supplier: updatedSupplierText,
+          quantity: newQty,
+          unit_cost: newUnitCost,
+          total_cost: newTotalCost,
+          amount_paid: newPaid,
+          payment_status: newDebt > 0.009 ? 'Pendiente' : 'Pagado'
+        })
+        .eq('id', editingPurchase.id)
+
+      if (
+        extUpd.error &&
+        (extUpd.error.message.includes('amount_paid') ||
+          extUpd.error.message.includes('payment_status') ||
+          extUpd.error.message.includes('column'))
+      ) {
+        const retryUpd = await supabase
+          .from('purchases')
+          .update({
+            item_name: editPurItemName.trim(),
+            supplier: updatedSupplierText,
+            quantity: newQty,
+            unit_cost: newUnitCost,
+            total_cost: newTotalCost
+          })
+          .eq('id', editingPurchase.id)
+        if (retryUpd.error) throw retryUpd.error
+      } else if (extUpd.error) {
+        throw extUpd.error
+      }
+
+      // Sincronizar también el ítem en Inventario Actual si está marcada la casilla
+      if (editPurSyncStock) {
+        const matchingInv = items.find(
+          i =>
+            i.name.toLowerCase() === editingPurchase.item_name.toLowerCase() ||
+            i.name.toLowerCase() === editPurItemName.trim().toLowerCase()
+        )
+        if (matchingInv) {
+          const qtyDelta = newQty - Number(editingPurchase.quantity)
+          const adjustedStock = Math.max(0, Number(matchingInv.stock) + qtyDelta)
+          await supabase
+            .from('inventory')
+            .update({
+              name: editPurItemName.trim(),
+              cost: newUnitCost,
+              stock: adjustedStock
+            })
+            .eq('id', matchingInv.id)
+        }
+      }
+
+      setEditPurchaseModalOpen(false)
+      setEditingPurchase(null)
+      await fetchInventoryAndCapital()
+    } catch (err: any) {
+      alert('Error al actualizar la compra: ' + err.message)
+    } finally {
+      setUpdatingPurchase(false)
+    }
+  }
+
   const openPaySupplierModal = (purchase: PurchaseRecord) => {
     const debt = getPurchasePendingDebt(purchase)
     setTargetCreditPurchase(purchase)
@@ -321,7 +425,6 @@ export default function Inventory() {
     setPaySupplierModalOpen(true)
   }
 
-  // Confirmar pago o abono a proveedor (este abono SÍ descuenta del capital disponible)
   const handleConfirmSupplierPayment = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!targetCreditPurchase) return
@@ -582,7 +685,6 @@ export default function Inventory() {
     navigate('/login')
   }
 
-  // Cálculos de Capital: SOLO lo efectivamente pagado en compras descuenta del capital
   const totalPurchasesPaidFromCapital = purchases.reduce((sum, p) => sum + getPurchasePaidAmount(p), 0)
   const totalSupplierDebt = purchases.reduce((sum, p) => sum + getPurchasePendingDebt(p), 0)
   const pendingPurchasesCount = purchases.filter(p => getPurchasePendingDebt(p) > 0.009).length
@@ -595,7 +697,6 @@ export default function Inventory() {
     ? purchases.filter(p => getPurchasePendingDebt(p) > 0.009)
     : purchases
 
-  // Filtrado en tiempo real
   const filteredItems = items.filter(item => {
     const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase())
     const matchesCategory = filterCategory === 'Todas' || item.category === filterCategory
@@ -1004,7 +1105,6 @@ export default function Inventory() {
 
             {activeTab === 'stock' || !isAdmin ? (
               <>
-                {/* Barra de Búsqueda y Filtros */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
                   <input
                     type="text"
@@ -1139,7 +1239,7 @@ export default function Inventory() {
                 )}
               </>
             ) : (
-              /* Tabla de Historial de Compras y Cuentas por Pagar a Proveedores */
+              /* Tabla de Historial de Compras y Cuentas por Pagar con botón Editar */
               <div>
                 {displayedPurchases.length === 0 ? (
                   <p className="text-sm text-gray-500">
@@ -1158,7 +1258,7 @@ export default function Inventory() {
                           <th className="p-3">Pagado</th>
                           <th className="p-3">Saldo Deuda</th>
                           <th className="p-3">Fecha</th>
-                          <th className="p-3 text-center">Acción</th>
+                          <th className="p-3 text-center">Acciones</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y text-sm text-gray-700">
@@ -1192,17 +1292,24 @@ export default function Inventory() {
                               <td className="p-3 text-xs text-gray-500">
                                 {new Date(p.created_at).toLocaleDateString()}
                               </td>
-                              <td className="p-3 text-center">
-                                {hasDebt ? (
+                              <td className="p-3">
+                                <div className="flex items-center justify-center gap-1.5">
                                   <button
-                                    onClick={() => openPaySupplierModal(p)}
-                                    className="bg-orange-600 hover:bg-orange-700 text-white px-2.5 py-1 rounded text-xs font-semibold transition"
+                                    onClick={() => openEditPurchaseModal(p)}
+                                    className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-1 rounded text-xs font-semibold transition"
+                                    title="Corregir cantidad, costo o nombre de esta compra"
                                   >
-                                    Pagar / Abonar
+                                    Editar
                                   </button>
-                                ) : (
-                                  <span className="text-xs text-green-700 font-medium">Liquidado</span>
-                                )}
+                                  {hasDebt && (
+                                    <button
+                                      onClick={() => openPaySupplierModal(p)}
+                                      className="bg-orange-600 hover:bg-orange-700 text-white px-2.5 py-1 rounded text-xs font-semibold transition"
+                                    >
+                                      Abonar
+                                    </button>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           )
@@ -1216,6 +1323,104 @@ export default function Inventory() {
           </div>
         </div>
       </div>
+
+      {/* Modal para EDITAR Compra Registrada */}
+      {editPurchaseModalOpen && editingPurchase && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Editar Registro de Compra</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Corrige la cantidad, costo unitario o descripción de esta compra. El capital inicial y el stock se recalcularán automáticamente.
+            </p>
+
+            <form onSubmit={handleSavePurchaseEdit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Equipo / Periférico</label>
+                <input
+                  type="text"
+                  value={editPurItemName}
+                  onChange={e => setEditPurItemName(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Proveedor</label>
+                <input
+                  type="text"
+                  value={editPurSupplier}
+                  onChange={e => setEditPurSupplier(e.target.value)}
+                  className="w-full border border-gray-300 p-2 rounded text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad Comprada</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={editPurQty}
+                    onChange={e => setEditPurQty(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Costo Unitario ({currency})</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={editPurUnitCost}
+                    onChange={e => setEditPurUnitCost(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="bg-gray-50 p-3 rounded border border-gray-200 flex justify-between items-center text-sm">
+                <span className="text-gray-600 font-medium">Nuevo Total Compra:</span>
+                <span className="font-bold text-red-700">
+                  {currency} {((Number(editPurQty) || 0) * (Number(editPurUnitCost) || 0)).toFixed(2)}
+                </span>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={editPurSyncStock}
+                  onChange={e => setEditPurSyncStock(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600"
+                />
+                Ajustar también la diferencia de stock y nombre en Inventario Actual
+              </label>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditPurchaseModalOpen(false)
+                    setEditingPurchase(null)
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingPurchase}
+                  className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 font-semibold"
+                >
+                  {updatingPurchase ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Modal para Pagar / Abonar Compra a Crédito a Proveedor */}
       {paySupplierModalOpen && targetCreditPurchase && (
