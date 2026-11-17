@@ -9,7 +9,7 @@ export default function Reports() {
 
   useEffect(() => {
     try {
-      // Cargar datos seguros desde localStorage (o puedes adaptarlo a Supabase)
+      // Carga segura desde localStorage con respaldo de array vacío
       const savedSales = JSON.parse(localStorage.getItem('reutilizanet_sales') || '[]');
       const savedCash = JSON.parse(localStorage.getItem('reutilizanet_cash') || '[]');
       
@@ -17,10 +17,18 @@ export default function Reports() {
       setCashMovements(Array.isArray(savedCash) ? savedCash : []);
     } catch (error) {
       console.error('Error al cargar datos de reportes:', error);
+      setSales([]);
+      setCashMovements([]);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Función auxiliar súper segura para evitar errores de .replace() o tipos nulos
+  const formatMoney = (value: any) => {
+    const num = Number(value);
+    return isNaN(num) ? '0.00' : num.toFixed(2);
+  };
 
   // Cálculos seguros
   const totalSalesAmount = sales.reduce((acc, item) => acc + (Number(item?.total) || 0), 0);
@@ -52,7 +60,7 @@ export default function Reports() {
               <div className="bg-blue-50 border-l-4 border-blue-600 p-4 rounded shadow-sm">
                 <h3 className="text-sm font-semibold text-blue-800 uppercase">Total Ventas Registradas</h3>
                 <p className="text-2xl font-bold text-blue-900 mt-1">{sales.length} transacciones</p>
-                <p className="text-sm text-blue-700 mt-1">Monto acumulado: Bs. {totalSalesAmount.toFixed(2)}</p>
+                <p className="text-sm text-blue-700 mt-1">Monto acumulado: Bs. {formatMoney(totalSalesAmount)}</p>
               </div>
 
               <div className="bg-green-50 border-l-4 border-green-600 p-4 rounded shadow-sm">
@@ -80,15 +88,22 @@ export default function Reports() {
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {sales.slice(-10).reverse().map((sale, index) => (
-                        <tr key={index} className="hover:bg-gray-50">
-                          <td className="px-4 py-2 text-sm text-gray-600">{sale?.date || 'Fecha no registrada'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-800">{sale?.client || sale?.description || 'Venta general'}</td>
-                          <td className="px-4 py-2 text-sm text-right font-semibold text-gray-900">
-                            Bs. {Number(sale?.total || 0).toFixed(2)}
-                          </td>
-                        </tr>
-                      ))}
+                      {sales.slice(-10).reverse().map((sale, index) => {
+                        // Limpieza segura de textos por si vienen con null o undefined
+                        const saleDate = typeof sale?.date === 'string' ? sale.date : (sale?.date ? String(sale.date) : 'Fecha no registrada');
+                        const saleClient = typeof sale?.client === 'string' ? sale.client : (sale?.description || 'Venta general');
+                        const saleTotal = formatMoney(sale?.total);
+
+                        return (
+                          <tr key={index} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 text-sm text-gray-600">{saleDate}</td>
+                            <td className="px-4 py-2 text-sm text-gray-800">{saleClient}</td>
+                            <td className="px-4 py-2 text-sm text-right font-semibold text-gray-900">
+                              Bs. {saleTotal}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
