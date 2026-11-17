@@ -16,7 +16,7 @@ interface InventoryItem {
 interface SaleRecord {
   id: string
   inventory_id?: string | null
-  product_name: string
+  product_name?: string
   serial_number?: string
   customer?: string
   quantity: number
@@ -24,15 +24,15 @@ interface SaleRecord {
   total_amount: number
   amount_paid?: number
   payment_status?: string
-  payment_method: string
+  payment_method?: string
   created_at: string
 }
 
 interface PurchaseRecord {
   id: string
-  item_name: string
-  category: string
-  supplier: string
+  item_name?: string
+  category?: string
+  supplier?: string
   quantity: number
   unit_cost: number
   total_cost: number
@@ -43,10 +43,10 @@ interface PurchaseRecord {
 
 interface ExpenseRecord {
   id: string
-  description: string
-  category: string
+  description?: string
+  category?: string
   amount: number
-  payment_method: string
+  payment_method?: string
   notes?: string
   created_at: string
 }
@@ -105,42 +105,50 @@ export default function Reports() {
 
   const fetchFinancialData = async () => {
     setLoading(true)
-    const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
-      supabase.from('sales').select('*').order('created_at', { ascending: false }),
-      supabase.from('inventory').select('*').order('name', { ascending: true }),
-      supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital').eq('id', 1).single(),
-      supabase.from('purchases').select('*').order('created_at', { ascending: false }),
-      supabase.from('expenses').select('*').order('created_at', { ascending: false })
-    ])
+    try {
+      const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
+        supabase.from('sales').select('*').order('created_at', { ascending: false }),
+        supabase.from('inventory').select('*').order('name', { ascending: true }),
+        supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital').eq('id', 1).maybeSingle(),
+        supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+        supabase.from('expenses').select('*').order('created_at', { ascending: false })
+      ])
 
-    if (salesRes.data) setSales(salesRes.data)
-    if (!purchasesRes.error && purchasesRes.data) setPurchases(purchasesRes.data)
-    if (!expensesRes.error && expensesRes.data) setExpenses(expensesRes.data)
-    if (settingsRes.data) {
-      if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
-      if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
-      if (settingsRes.data.logo_url) setLogoUrl(settingsRes.data.logo_url)
-      setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
-    }
+      if (salesRes.data) setSales(salesRes.data)
+      if (purchasesRes.data) setPurchases(purchasesRes.data)
+      if (expensesRes.data) setExpenses(expensesRes.data)
+      if (settingsRes.data) {
+        if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
+        if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
+        if (settingsRes.data.logo_url) setLogoUrl(settingsRes.data.logo_url)
+        setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+      }
 
-    if (invRes.data) {
-      setInventoryItems(invRes.data)
-      const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost) * Number(item.stock)), 0)
-      setInventoryValue(totalInvCost)
+      if (invRes.data) {
+        setInventoryItems(invRes.data)
+        const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost || 0) * Number(item.stock || 0)), 0)
+        setInventoryValue(totalInvCost)
+      }
+    } catch (err) {
+      console.error('Error fetching reports data:', err)
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const extractSerial = (sale: SaleRecord): string => {
+    if (!sale) return ''
     if (sale.serial_number && sale.serial_number.trim() !== '') {
       return sale.serial_number.trim()
     }
-    const match = sale.product_name?.match(/\[S\/N:\s*([^\]]+)\]/i)
+    const productName = sale.product_name || ''
+    const match = productName.match(/\[S\/N:\s*([^\]]+)\]/i)
     return match ? match[1].trim() : ''
   }
 
-  const cleanProductName = (name: string): string => {
-    return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim()
+  const cleanProductName = (name?: string): string => {
+    if (!name) return 'Producto sin nombre'
+    return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim() || 'Producto sin nombre'
   }
 
   const cleanSupplierName = (supplierStr?: string): string => {
@@ -149,37 +157,43 @@ export default function Reports() {
   }
 
   const getPurchasePaidAmount = (p: PurchaseRecord): number => {
+    if (!p) return 0
     if (typeof p.amount_paid === 'number' && !isNaN(p.amount_paid)) {
       return Number(p.amount_paid)
     }
-    const match = p.supplier?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    const supplier = p.supplier || ''
+    const match = supplier.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
     if (match) return Number(match[1])
-    if (p.payment_status === 'Pendiente' || p.supplier?.toLowerCase().includes('[crédito')) {
+    if (p.payment_status === 'Pendiente' || supplier.toLowerCase().includes('[crédito')) {
       return 0
     }
     return Number(p.total_cost) || 0
   }
 
   const getPurchasePendingDebt = (p: PurchaseRecord): number => {
+    if (!p) return 0
     const total = Number(p.total_cost) || 0
     const paid = getPurchasePaidAmount(p)
     return Math.max(0, Number((total - paid).toFixed(2)))
   }
 
   const getSalePaidAmount = (sale: SaleRecord): number => {
+    if (!sale) return 0
     if (typeof sale.amount_paid === 'number' && !isNaN(sale.amount_paid)) {
       return Number(sale.amount_paid)
     }
-    const match = sale.payment_method?.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
+    const payMethod = sale.payment_method || ''
+    const match = payMethod.match(/Pagado:\s*([0-9]+(?:\.[0-9]+)?)/i)
     if (match) return Number(match[1])
-    if (sale.payment_method?.toLowerCase().includes('crédito') || sale.payment_method?.toLowerCase().includes('credito')) {
+    if (payMethod.toLowerCase().includes('crédito') || payMethod.toLowerCase().includes('credito')) {
       return 0
     }
-    return Number(sale.total_amount)
+    return Number(sale.total_amount) || 0
   }
 
   const getSalePendingBalance = (sale: SaleRecord): number => {
-    const total = Number(sale.total_amount)
+    if (!sale) return 0
+    const total = Number(sale.total_amount) || 0
     const paid = getSalePaidAmount(sale)
     return Math.max(0, Number((total - paid).toFixed(2)))
   }
@@ -191,18 +205,21 @@ export default function Reports() {
 
   const matchesDateRange = (isoDate?: string) => {
     if (!isoDate) return true
-    const day = new Date(isoDate).toISOString().split('T')[0]
-    if (dateFrom && day < dateFrom) return false
-    if (dateTo && day > dateTo) return false
-    return true
+    try {
+      const day = new Date(isoDate).toISOString().split('T')[0]
+      if (dateFrom && day < dateFrom) return false
+      if (dateTo && day > dateTo) return false
+      return true
+    } catch {
+      return true
+    }
   }
 
-  const matchesItemName = (rawName: string) => {
+  const matchesItemName = (rawName?: string) => {
     if (!selectedItemFilter) return true
     return cleanProductName(rawName).toLowerCase() === selectedItemFilter.toLowerCase()
   }
 
-  // Construir Estado de Cuenta de Capital: Capital Inicial -> Todos los egresos (Compras pagadas + Gastos) -> Saldo
   const buildCapitalStatement = (): {
     rows: CapitalOutflowRow[]
     totalOutflows: number
@@ -211,36 +228,37 @@ export default function Reports() {
     const rawOutflows: Omit<CapitalOutflowRow, 'running_balance'>[] = []
 
     purchases.forEach(p => {
+      if (!p) return
       const paid = getPurchasePaidAmount(p)
       if (paid > 0) {
         rawOutflows.push({
           id: `pur-${p.id}`,
-          date: p.created_at,
+          date: p.created_at || new Date().toISOString(),
           origin: 'Compra Inventario',
           category: p.category || 'Compras',
-          description: `${p.quantity}x ${p.item_name}`,
-          detail: `Proveedor: ${cleanSupplierName(p.supplier)} (${currency} ${Number(p.unit_cost).toFixed(2)} c/u)`,
+          description: `${p.quantity || 1}x ${p.item_name || 'Ítem'}`,
+          detail: `Proveedor: ${cleanSupplierName(p.supplier)} (${currency} ${Number(p.unit_cost || 0).toFixed(2)} c/u)`,
           amount: paid
         })
       }
     })
 
     expenses.forEach(exp => {
+      if (!exp) return
       const amt = Number(exp.amount) || 0
       if (amt > 0) {
         rawOutflows.push({
           id: `exp-${exp.id}`,
-          date: exp.created_at,
+          date: exp.created_at || new Date().toISOString(),
           origin: 'Gasto Operativo',
           category: exp.category || 'Gasto General',
-          description: exp.description,
+          description: exp.description || 'Gasto sin descripción',
           detail: [exp.payment_method, exp.notes].filter(Boolean).join(' — '),
           amount: amt
         })
       }
     })
 
-    // Orden cronológico para ir descontando del Capital Inicial paso a paso
     rawOutflows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 
     let currentCapital = initialCapital
@@ -264,8 +282,8 @@ export default function Reports() {
 
   const capitalStatement = buildCapitalStatement()
 
-  // 1. Ventas filtradas
   const filteredSales = sales.filter(sale => {
+    if (!sale) return false
     const pending = getSalePendingBalance(sale)
     const isPending = pending > 0.009
 
@@ -276,8 +294,8 @@ export default function Reports() {
     return true
   })
 
-  // 2. Compras filtradas
   const filteredPurchases = purchases.filter(p => {
+    if (!p) return false
     const debt = getPurchasePendingDebt(p)
     const isPending = debt > 0.009
 
@@ -289,50 +307,51 @@ export default function Reports() {
     return true
   })
 
-  // 3. Stock de ítems específicos
   const filteredStockItems = inventoryItems.filter(item => {
+    if (!item) return false
     if (selectedCategoryFilter !== 'Todas' && item.category !== selectedCategoryFilter) return false
-    if (selectedItemFilter && item.name.toLowerCase() !== selectedItemFilter.toLowerCase()) return false
+    if (selectedItemFilter && item.name?.toLowerCase() !== selectedItemFilter.toLowerCase()) return false
     return true
   })
 
-  // 4. Kardex cronológico
   const buildKardexMovements = (): KardexMovement[] => {
     const rawMovements: KardexMovement[] = []
 
     purchases.forEach(p => {
+      if (!p) return
       if (selectedCategoryFilter !== 'Todas' && p.category !== selectedCategoryFilter) return
       if (!matchesItemName(p.item_name)) return
       const debt = getPurchasePendingDebt(p)
       rawMovements.push({
         id: `pur-${p.id}`,
-        date: p.created_at,
+        date: p.created_at || new Date().toISOString(),
         type: 'ENTRADA (Compra)',
-        item_name: p.item_name,
+        item_name: p.item_name || 'Ítem',
         reference: `Proveedor: ${cleanSupplierName(p.supplier)}${debt > 0 ? ' (A Crédito)' : ''}`,
-        in_qty: Number(p.quantity),
+        in_qty: Number(p.quantity || 0),
         out_qty: 0,
-        unit_cost: Number(p.unit_cost),
-        total_value: Number(p.total_cost)
+        unit_cost: Number(p.unit_cost || 0),
+        total_value: Number(p.total_cost || 0)
       })
     })
 
     sales.forEach(s => {
+      if (!s) return
       const cleanName = cleanProductName(s.product_name)
-      const invMatch = inventoryItems.find(i => i.name.toLowerCase() === cleanName.toLowerCase())
+      const invMatch = inventoryItems.find(i => i.name?.toLowerCase() === cleanName.toLowerCase())
       if (selectedCategoryFilter !== 'Todas' && invMatch && invMatch.category !== selectedCategoryFilter) return
       if (!matchesItemName(s.product_name)) return
       rawMovements.push({
         id: `sal-${s.id}`,
-        date: s.created_at,
+        date: s.created_at || new Date().toISOString(),
         type: 'SALIDA (Venta)',
         item_name: cleanName,
         reference: `Cliente: ${s.customer || 'Mostrador'}`,
         serial_number: extractSerial(s),
         in_qty: 0,
-        out_qty: Number(s.quantity),
-        unit_cost: Number(s.unit_cost),
-        total_value: Number(s.total_amount)
+        out_qty: Number(s.quantity || 0),
+        unit_cost: Number(s.unit_cost || 0),
+        total_value: Number(s.total_amount || 0)
       })
     })
 
@@ -340,7 +359,7 @@ export default function Reports() {
 
     const balancesByProduct: Record<string, number> = {}
     const withBalances = rawMovements.map(mov => {
-      const key = mov.item_name.toLowerCase()
+      const key = (mov.item_name || '').toLowerCase()
       const prevBal = balancesByProduct[key] || 0
       const nextBal = prevBal + mov.in_qty - mov.out_qty
       balancesByProduct[key] = nextBal
@@ -355,21 +374,10 @@ export default function Reports() {
 
   const kardexMovements = buildKardexMovements()
 
-  // Métricas financieras
-  const totalRevenue = filteredSales.reduce((acc, s) => acc + Number(s.total_amount), 0)
-  const totalCollected = filteredSales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
-  const totalReceivable = filteredSales.reduce((acc, s) => acc + getSalePendingBalance(s), 0)
-  const totalSoldCost = filteredSales.reduce((acc, s) => acc + (Number(s.unit_cost) * Number(s.quantity)), 0)
-  const grossSalesProfit = totalRevenue - totalSoldCost
-
-  const filteredExpensesOnly = expenses.filter(exp => matchesDateRange(exp.created_at))
-  const totalExpensesPeriod = filteredExpensesOnly.reduce((acc, e) => acc + Number(e.amount || 0), 0)
-  const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e.amount || 0), 0)
-  const netRealProfit = grossSalesProfit - totalExpensesPeriod
-
-  const totalPurchasesPaidPeriod = filteredPurchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
-  const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
+  const filteredExpensesOnly = expenses.filter(exp => exp && matchesDateRange(exp.created_at))
+  const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e?.amount || 0), 0)
   const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
+  const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
 
   const remainingCapitalAfterOutflows = initialCapital - totalPurchasesPaidAll - totalExpensesAll
   const totalCashOnHand =
@@ -393,11 +401,11 @@ export default function Reports() {
 
   const uniqueProductNames = Array.from(
     new Set([
-      ...inventoryItems.map(i => i.name),
-      ...purchases.map(p => p.item_name),
-      ...sales.map(s => cleanProductName(s.product_name))
+      ...inventoryItems.map(i => i?.name).filter(Boolean),
+      ...purchases.map(p => p?.item_name).filter(Boolean),
+      ...sales.map(s => cleanProductName(s?.product_name)).filter(Boolean)
     ])
-  ).sort()
+  ).sort() as string[]
 
   const handlePrint = () => {
     window.print()
@@ -662,7 +670,6 @@ export default function Reports() {
                       </td>
                     </tr>
 
-                    {/* Filas de cada gasto o compra pagada */}
                     {capitalStatement.rows.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="p-4 text-center text-sm text-gray-500">
@@ -709,7 +716,6 @@ export default function Reports() {
                     )}
                   </tbody>
 
-                  {/* Pie de tabla: Resumen Total Gastado y Saldo Final */}
                   <tfoot>
                     <tr className="border-t-2 border-gray-800 bg-gray-100 font-bold text-sm">
                       <td colSpan={4} className="p-3 text-right uppercase text-gray-700">
@@ -773,11 +779,11 @@ export default function Reports() {
                     </thead>
                     <tbody className="divide-y text-sm text-gray-700">
                       {filteredSales.map(item => {
-                        const total = Number(item.total_amount)
+                        const total = Number(item.total_amount || 0)
                         const paid = getSalePaidAmount(item)
                         const pending = getSalePendingBalance(item)
                         const hasDebt = pending > 0.009
-                        const costTotal = Number(item.unit_cost) * Number(item.quantity)
+                        const costTotal = Number(item.unit_cost || 0) * Number(item.quantity || 1)
                         const profit = total - costTotal
                         const sn = extractSerial(item)
 
@@ -842,7 +848,7 @@ export default function Reports() {
                               {new Date(p.created_at).toLocaleDateString()}
                             </td>
                             <td className="p-3">
-                              <p className="font-medium text-gray-900">{p.item_name}</p>
+                              <p className="font-medium text-gray-900">{p.item_name || 'Ítem'}</p>
                               <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-0.5 ${
                                 hasDebt ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
                               }`}>
@@ -851,8 +857,8 @@ export default function Reports() {
                             </td>
                             <td className="p-3 text-xs">{cleanSupplierName(p.supplier)}</td>
                             <td className="p-3 text-center font-semibold">{p.quantity}</td>
-                            <td className="p-3 font-semibold">{currency} {Number(p.total_cost).toFixed(2)}</td>
-                            <td className="p-3 text-red-600 font-semibold">- {currency} {paid.toFixed(2)}</td>
+                            <td className="p-3 font-semibold">{currency} {Number(p.total_cost || 0).toFixed(2)}</td>
+                            <td className="p-3 text-red-600 font-semibold">{currency} {paid.toFixed(2)}</td>
                             <td className="p-3">
                               {hasDebt ? (
                                 <span className="font-bold text-orange-700">{currency} {debt.toFixed(2)}</span>
@@ -893,12 +899,12 @@ export default function Reports() {
                     <tbody className="divide-y text-sm text-gray-700">
                       {filteredStockItems.map(item => {
                         const periodIn = filteredPurchases
-                          .filter(p => p.item_name.toLowerCase() === item.name.toLowerCase())
-                          .reduce((sum, p) => sum + Number(p.quantity), 0)
+                          .filter(p => p?.item_name?.toLowerCase() === item?.name?.toLowerCase())
+                          .reduce((sum, p) => sum + Number(p.quantity || 0), 0)
                         const periodOut = filteredSales
-                          .filter(s => cleanProductName(s.product_name).toLowerCase() === item.name.toLowerCase())
-                          .reduce((sum, s) => sum + Number(s.quantity), 0)
-                        const valTotal = Number(item.cost) * Number(item.stock)
+                          .filter(s => cleanProductName(s?.product_name).toLowerCase() === item?.name?.toLowerCase())
+                          .reduce((sum, s) => sum + Number(s.quantity || 0), 0)
+                        const valTotal = Number(item.cost || 0) * Number(item.stock || 0)
 
                         return (
                           <tr key={item.id} className="hover:bg-gray-50">
@@ -909,12 +915,12 @@ export default function Reports() {
                             <td className="p-3 text-center text-red-600 font-semibold">-{periodOut}</td>
                             <td className="p-3 text-center">
                               <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                                item.stock === 0 ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-800'
+                                Number(item.stock || 0) === 0 ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-800'
                               }`}>
                                 {item.stock}
                               </span>
                             </td>
-                            <td className="p-3">{currency} {Number(item.cost).toFixed(2)}</td>
+                            <td className="p-3">{currency} {Number(item.cost || 0).toFixed(2)}</td>
                             <td className="p-3 font-bold text-gray-900">{currency} {valTotal.toFixed(2)}</td>
                           </tr>
                         )
