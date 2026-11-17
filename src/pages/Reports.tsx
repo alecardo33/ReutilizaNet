@@ -1,45 +1,8 @@
-import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { supabase } from '../lib/supabase'
+import { supabase } from '../supabaseClient'
 
-// Componente de seguridad para atrapar cualquier error visual y mostrarlo en pantalla
-class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
-  state = { hasError: false, error: null }
-
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error }
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Error en Reportes:", error, errorInfo)
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="p-8 max-w-2xl mx-auto mt-10 bg-red-50 border border-red-300 rounded-lg shadow">
-          <h2 className="text-xl font-bold text-red-800 mb-2">Se produjo un error al cargar los reportes</h2>
-          <p className="text-sm text-red-600 font-mono bg-white p-3 rounded border border-red-200 mb-4">
-            {this.state.error?.message || 'Error desconocido'}
-          </p>
-          <button 
-            onClick={() => window.location.href = '/'}
-            className="bg-gray-800 text-white px-4 py-2 rounded text-sm font-semibold hover:bg-black"
-          >
-            Volver al Inicio
-          </button>
-        </div>
-      )
-    }
-    return this.nodeChildren()
-  }
-
-  nodeChildren() {
-    return this.props.children
-  }
-}
-
-function ReportsContent() {
+export default function Reports() {
   const navigate = useNavigate()
   const [sales, setSales] = useState<any[]>([])
   const [purchases, setPurchases] = useState<any[]>([])
@@ -50,6 +13,7 @@ function ReportsContent() {
   const [companyName, setCompanyName] = useState('ReutilizaNet')
   const [logoUrl, setLogoUrl] = useState('')
   const [loading, setLoading] = useState(true)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const [reportTab, setReportTab] = useState<'capital_expenses' | 'sales' | 'purchases' | 'stock' | 'kardex'>('capital_expenses')
   const [dateFrom, setDateFrom] = useState('')
@@ -64,6 +28,7 @@ function ReportsContent() {
 
   const fetchFinancialData = async () => {
     setLoading(true)
+    setErrorMessage(null)
     try {
       const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
@@ -72,6 +37,11 @@ function ReportsContent() {
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
         supabase.from('expenses').select('*').order('created_at', { ascending: false })
       ])
+
+      if (salesRes.error) console.error('Error sales:', salesRes.error)
+      if (invRes.error) console.error('Error inventory:', invRes.error)
+      if (purchasesRes.error) console.error('Error purchases:', purchasesRes.error)
+      if (expensesRes.error) console.error('Error expenses:', expensesRes.error)
 
       if (salesRes.data) setSales(salesRes.data)
       if (purchasesRes.data) setPurchases(purchasesRes.data)
@@ -83,8 +53,9 @@ function ReportsContent() {
         setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
       }
       if (invRes.data) setInventoryItems(invRes.data)
-    } catch (err) {
-      console.error('Error fetching reports data:', err)
+    } catch (err: any) {
+      console.error('Error general cargando reportes:', err)
+      setErrorMessage(err?.message || 'Error desconocido al cargar datos')
     } finally {
       setLoading(false)
     }
@@ -132,7 +103,7 @@ function ReportsContent() {
     return cleanProductName(rawName).toLowerCase() === selectedItemFilter.toLowerCase()
   }
 
-  // Cálculos seguros
+  // Métricas financieras seguras
   const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e?.amount || 0), 0)
   const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
   const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
@@ -146,45 +117,57 @@ function ReportsContent() {
   return (
     <div className="min-h-screen bg-gray-100 p-6">
       <div className="max-w-7xl mx-auto">
-        <div className="flex justify-between items-center bg-white p-4 rounded-lg shadow mb-6">
-          <h1 className="text-xl font-bold text-gray-800">Panel Gerencial — {companyName}</h1>
-          <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm">Inicio</button>
+        <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-lg shadow mb-6 gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-800">Panel Gerencial y Reportes — {companyName}</h1>
+            <p className="text-sm text-gray-500">Control financiero y de inventario</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+              Inicio
+            </button>
+            <button onClick={() => navigate('/cashbox')} className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">
+              Caja
+            </button>
+          </div>
         </div>
+
+        {errorMessage && (
+          <div className="bg-red-50 border border-red-300 text-red-700 p-4 rounded-lg mb-6 text-sm">
+            <strong>Error al cargar:</strong> {errorMessage}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-          <div className="bg-white p-4 rounded shadow">
-            <p className="text-xs text-gray-500 uppercase">Capital Inicial</p>
-            <p className="text-lg font-bold">{currency} {initialCapital.toFixed(2)}</p>
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-gray-800">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Capital Inicial</p>
+            <p className="text-xl font-bold text-gray-900 mt-1">{currency} {initialCapital.toFixed(2)}</p>
           </div>
-          <div className="bg-white p-4 rounded shadow">
-            <p className="text-xs text-gray-500 uppercase">Total Gastado</p>
-            <p className="text-lg font-bold text-red-600">{currency} {(totalPurchasesPaidAll + totalExpensesAll).toFixed(2)}</p>
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-red-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Total Gastado / Invertido</p>
+            <p className="text-xl font-bold text-red-600 mt-1">- {currency} {(totalPurchasesPaidAll + totalExpensesAll).toFixed(2)}</p>
           </div>
-          <div className="bg-white p-4 rounded shadow">
-            <p className="text-xs text-gray-500 uppercase">Liquidez Total</p>
-            <p className="text-lg font-bold text-emerald-600">{currency} {totalCashOnHand.toFixed(2)}</p>
+          <div className="bg-white p-5 rounded-lg shadow border-l-4 border-emerald-600">
+            <p className="text-xs text-gray-500 uppercase font-semibold">Liquidez Total (Con Ventas)</p>
+            <p className="text-xl font-bold text-emerald-700 mt-1">{currency} {totalCashOnHand.toFixed(2)}</p>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded shadow">
+        <div className="bg-white p-6 rounded-lg shadow">
           {loading ? (
-            <p className="text-sm text-gray-500">Cargando reportes...</p>
+            <p className="text-sm text-gray-500">Cargando información de reportes...</p>
           ) : (
             <div>
-              <p className="text-sm font-semibold text-green-700 mb-4">¡Reportes cargados correctamente sin errores!</p>
-              <p className="text-sm text-gray-600">Ventas registradas: {sales.length} | Compras: {purchases.length} | Gastos: {expenses.length}</p>
+              <p className="text-sm text-gray-700 font-semibold mb-2">Resumen general de operaciones:</p>
+              <ul className="text-sm text-gray-600 list-disc pl-5 space-y-1">
+                <li>Ventas registradas: {filteredSales.length}</li>
+                <li>Compras registradas: {filteredPurchases.length}</li>
+                <li>Ítems en inventario: {filteredStockItems.length}</li>
+              </ul>
             </div>
           )}
         </div>
       </div>
     </div>
-  )
-}
-
-export default function Reports() {
-  return (
-    <ErrorBoundary>
-      <ReportsContent />
-    </ErrorBoundary>
   )
 }
