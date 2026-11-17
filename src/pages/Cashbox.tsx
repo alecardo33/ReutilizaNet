@@ -67,7 +67,7 @@ export default function Cashbox() {
 
     setLoading(true);
     try {
-      // 1. Insertar la venta en Supabase enviando amount_paid, change_amount y payment_method
+      // Insertar la venta en Supabase sin incluir campos que no existan en el esquema
       const { data: saleData, error: saleError } = await supabase
         .from('sales')
         .insert([
@@ -85,7 +85,7 @@ export default function Cashbox() {
 
       if (saleError) throw saleError;
 
-      // 2. ¡SÓLO AQUÍ (éxito total)! Limpiamos el carrito y reseteamos el formulario
+      // Éxito: Limpiamos el carrito y reseteamos el formulario
       setCart([]);
       setAmountPaid('');
       setClientName('');
@@ -93,7 +93,7 @@ export default function Cashbox() {
       fetchProducts();
 
     } catch (err: any) {
-      // Si ocurre un error, EL CARRITO NO SE BORRA, permitiendo reintentar sin perder productos
+      // El carrito NO se borra si hay un error, permitiendo corregir o reintentar
       console.error('Error al procesar la venta:', err);
       alert(`Error al procesar la venta: ${err.message || 'Error desconocido'}`);
     } finally {
