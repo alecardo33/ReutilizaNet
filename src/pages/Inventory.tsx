@@ -826,9 +826,7 @@ export default function Inventory() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => navigate('/store')} className="bg-amber-600 text-white px-4 py-2 rounded text-sm hover:bg-amber-700">
-              Tienda
-            </button>
+            
             {isAdmin && (
               <>
                 <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
