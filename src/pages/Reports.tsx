@@ -187,9 +187,28 @@ export default function Reports() {
     return match ? match[1].trim() : ''
   }
 
+  const resolveSaleProductName = (sale?: SaleRecord | any): string => {
+    if (!sale) return 'Sin detalle de producto en registro'
+    const raw =
+      sale.product_name ||
+      sale.item_name ||
+      sale.description ||
+      sale.name ||
+      ''
+    const cleaned = String(raw).replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim()
+    if (cleaned) return cleaned
+
+    if (sale.inventory_id) {
+      const matched = inventoryItems.find(i => i.id === sale.inventory_id)
+      if (matched?.name) return matched.name
+    }
+
+    return 'Venta sin nombre de producto (guardada en blanco en BD)'
+  }
+
   const cleanProductName = (name?: string): string => {
-    if (!name) return 'Producto sin nombre'
-    return name.replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim() || 'Producto sin nombre'
+    if (!name) return 'Venta sin nombre de producto'
+    return String(name).replace(/\s*\[S\/N:\s*[^\]]+\]/i, '').trim() || 'Venta sin nombre de producto'
   }
 
   const cleanSupplierName = (supplierStr?: string): string => {
@@ -280,12 +299,18 @@ export default function Reports() {
     try {
       await restoreInventoryForSale(sale)
 
-      const { error: delErr } = await supabase
+      const { data: deletedRows, error: delErr } = await supabase
         .from('sales')
         .delete()
         .eq('id', sale.id)
+        .select()
 
       if (delErr) throw delErr
+      if (!deletedRows || deletedRows.length === 0) {
+        throw new Error(
+          'Supabase no eliminó la fila de "sales" (0 filas afectadas). Revisa la política RLS de DELETE en la tabla sales para tu usuario/rol.'
+        )
+      }
 
       setSales(prev => prev.filter(s => s.id !== sale.id))
       setSaleActionMessage(`Venta "${cleanProductName(sale.product_name)}" anulada y stock devuelto al inventario.`)
@@ -311,12 +336,18 @@ export default function Reports() {
     setSaleActionLoadingId(sale.id)
     setSaleActionMessage('')
     try {
-      const { error: delErr } = await supabase
+      const { data: deletedRows, error: delErr } = await supabase
         .from('sales')
         .delete()
         .eq('id', sale.id)
+        .select()
 
       if (delErr) throw delErr
+      if (!deletedRows || deletedRows.length === 0) {
+        throw new Error(
+          'Supabase no eliminó la fila de "sales" (0 filas afectadas). Revisa la política RLS de DELETE en la tabla sales para tu usuario/rol.'
+        )
+      }
 
       setSales(prev => prev.filter(s => s.id !== sale.id))
       setSaleActionMessage(`Registro de venta "${cleanProductName(sale.product_name)}" eliminado sin alterar el inventario.`)
@@ -466,7 +497,7 @@ export default function Reports() {
 
     sales.forEach(s => {
       if (!s) return
-      const cleanName = cleanProductName(s.product_name)
+      const cleanName = resolveSaleProductName(s)
       const invMatch = inventoryItems.find(i => i.name?.toLowerCase() === cleanName.toLowerCase())
       if (selectedCategoryFilter !== 'Todas' && invMatch && invMatch.category !== selectedCategoryFilter) return
       if (!matchesItemName(s.product_name)) return
@@ -532,7 +563,7 @@ export default function Reports() {
     new Set([
       ...inventoryItems.map(i => i?.name).filter(Boolean),
       ...purchases.map(p => p?.item_name).filter(Boolean),
-      ...sales.map(s => cleanProductName(s?.product_name)).filter(Boolean)
+      ...sales.map(s => resolveSaleProductName(s)).filter(Boolean)
     ])
   ).sort() as string[]
 
@@ -940,7 +971,7 @@ export default function Reports() {
                             <td className="p-3 text-xs text-gray-500">
                               {new Date(item.created_at).toLocaleDateString()}
                             </td>
-                            <td className="p-3 font-medium text-gray-900">{cleanProductName(item.product_name)}</td>
+                            <td className="p-3 font-medium text-gray-900">{resolveSaleProductName(item)}</td>
                             <td className="p-3 font-mono text-xs text-blue-700">{sn || '—'}</td>
                             <td className="p-3 text-xs">{item.customer || 'Cliente Mostrador'}</td>
                             <td className="p-3 text-center">{item.quantity}</td>
@@ -1260,7 +1291,7 @@ export default function Reports() {
                       {Number(reprintSale.quantity || 1)}
                     </td>
                     <td className="p-2 border-r border-gray-300 font-semibold">
-                      {cleanProductName(reprintSale.product_name)}
+                      {resolveSaleProductName(reprintSale)}
                     </td>
                     <td className="p-2 border-r border-gray-300 text-right">
                       {currency}{' '}
