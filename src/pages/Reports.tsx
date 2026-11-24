@@ -91,6 +91,24 @@ export default function Reports() {
   const [userRole, setUserRole] = useState<string>('')
   const [saleActionLoadingId, setSaleActionLoadingId] = useState<string | null>(null)
   const [saleActionMessage, setSaleActionMessage] = useState<string>('')
+  const [reprintSale, setReprintSale] = useState<SaleRecord | null>(null)
+  const [companyDetails, setCompanyDetails] = useState<{
+    nit: string
+    address: string
+    phone: string
+    warranty_notes: string
+    bank_name: string
+    account_number: string
+    account_holder: string
+  }>({
+    nit: '',
+    address: 'La Paz - Bolivia',
+    phone: '',
+    warranty_notes: '30 días de garantía por defectos de hardware (no cubre daños físicos, líquidos ni sobrecargas).',
+    bank_name: '',
+    account_number: '',
+    account_holder: ''
+  })
 
   // Pestaña activa de reportes
   const [reportTab, setReportTab] = useState<'capital_expenses' | 'sales' | 'purchases' | 'stock' | 'kardex'>('capital_expenses')
@@ -117,13 +135,13 @@ export default function Reports() {
           .eq('id', user.id)
           .maybeSingle()
         if (profile?.role) {
-          setUserRole(profile.role)
+          setUserRole(String(profile.role).trim().toLowerCase())
         }
       }
       const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('inventory').select('*').order('name', { ascending: true }),
-        supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital').eq('id', 1).maybeSingle(),
+        supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital, nit, address, phone, warranty_notes, bank_name, account_number, account_holder').eq('id', 1).maybeSingle(),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
         supabase.from('expenses').select('*').order('created_at', { ascending: false })
       ])
@@ -136,6 +154,15 @@ export default function Reports() {
         if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
         if (settingsRes.data.logo_url) setLogoUrl(settingsRes.data.logo_url)
         setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+        setCompanyDetails({
+          nit: settingsRes.data.nit || '',
+          address: settingsRes.data.address || 'La Paz - Bolivia',
+          phone: settingsRes.data.phone || '',
+          warranty_notes: settingsRes.data.warranty_notes || '30 días de garantía por defectos de hardware (no cubre daños físicos, líquidos ni sobrecargas).',
+          bank_name: settingsRes.data.bank_name || '',
+          account_number: settingsRes.data.account_number || '',
+          account_holder: settingsRes.data.account_holder || ''
+        })
       }
 
       if (invRes.data) {
@@ -871,9 +898,14 @@ export default function Reports() {
             </div>
           ) : reportTab === 'sales' ? (
             <div>
-              <h2 className="text-lg font-bold text-gray-800 mb-3">
-                Reporte de Ventas {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
-              </h2>
+              <div className="flex flex-wrap justify-between items-center mb-3 gap-2">
+                <h2 className="text-lg font-bold text-gray-800">
+                  Reporte de Ventas {dateFrom || dateTo ? `(${dateFrom || 'Inicio'} al ${dateTo || 'Hoy'})` : ''}
+                </h2>
+                <span className="text-xs px-2.5 py-1 rounded bg-gray-100 text-gray-700 font-medium">
+                  Rol detectado: <strong>{userRole || 'sin rol'}</strong> {isAdmin ? '(Admin: Anular/Eliminar habilitado)' : '(Solo lectura)'}
+                </span>
+              </div>
               {filteredSales.length === 0 ? (
                 <p className="text-sm text-gray-500">No hay ventas en el rango de fechas o filtros seleccionados.</p>
               ) : (
@@ -890,7 +922,7 @@ export default function Reports() {
                         <th className="p-3">Cobrado</th>
                         <th className="p-3">Saldo</th>
                         <th className="p-3">Margen</th>
-                        {isAdmin && <th className="p-3 text-center no-print">Acciones</th>}
+                        <th className="p-3 text-center no-print">Acciones</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y text-sm text-gray-700">
@@ -924,30 +956,40 @@ export default function Reports() {
                             <td className={`p-3 font-bold ${profit >= 0 ? 'text-green-700' : 'text-red-600'}`}>
                               {profit >= 0 ? '+' : ''}{currency} {profit.toFixed(2)}
                             </td>
-                            {isAdmin && (
-                              <td className="p-3 text-center whitespace-nowrap no-print">
-                                <div className="flex items-center justify-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    disabled={saleActionLoadingId === item.id}
-                                    onClick={() => handleAnnulSale(item)}
-                                    title="Anular venta y devolver stock al inventario"
-                                    className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
-                                  >
-                                    {saleActionLoadingId === item.id ? '...' : 'Anular'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={saleActionLoadingId === item.id}
-                                    onClick={() => handleDeleteSaleOnly(item)}
-                                    title="Eliminar registro de venta sin tocar el inventario"
-                                    className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
-                                  >
-                                    Eliminar
-                                  </button>
-                                </div>
-                              </td>
-                            )}
+                            <td className="p-3 text-center whitespace-nowrap no-print">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setReprintSale(item)}
+                                  title="Reimprimir nota de venta"
+                                  className="bg-blue-100 hover:bg-blue-200 text-blue-900 text-xs font-semibold px-2.5 py-1 rounded transition"
+                                >
+                                  Reimprimir
+                                </button>
+                                {isAdmin && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={saleActionLoadingId === item.id}
+                                      onClick={() => handleAnnulSale(item)}
+                                      title="Anular venta y devolver stock al inventario"
+                                      className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
+                                    >
+                                      {saleActionLoadingId === item.id ? '...' : 'Anular'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={saleActionLoadingId === item.id}
+                                      onClick={() => handleDeleteSaleOnly(item)}
+                                      title="Eliminar registro de venta sin tocar el inventario"
+                                      className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
+                                    >
+                                      Eliminar
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         )
                       })}
@@ -1147,6 +1189,158 @@ export default function Reports() {
           )}
         </div>
       </div>
+      {/* Modal Imprimible: Reimpresión de Nota de Venta */}
+      {reprintSale && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-2xl max-w-2xl w-full p-6 border border-gray-300 my-8">
+            <style>{`
+              @media print {
+                body * { visibility: hidden; }
+                #printable-sale-note, #printable-sale-note * { visibility: visible; }
+                #printable-sale-note { position: absolute; left: 0; top: 0; width: 100%; padding: 20px; }
+                .no-print-sale-note { display: none !important; }
+              }
+            `}</style>
+
+            <div id="printable-sale-note" className="space-y-4 text-gray-900">
+              <div className="flex justify-between items-start border-b-2 border-gray-800 pb-4">
+                <div className="flex items-center gap-3">
+                  {logoUrl && (
+                    <img src={logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+                  )}
+                  <div>
+                    <h2 className="text-xl font-extrabold uppercase tracking-wide">{companyName}</h2>
+                    {companyDetails.nit && <p className="text-xs text-gray-600">NIT: {companyDetails.nit}</p>}
+                    <p className="text-xs text-gray-600">{companyDetails.address}</p>
+                    {companyDetails.phone && <p className="text-xs text-gray-600">Tel: {companyDetails.phone}</p>}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block bg-blue-900 text-white text-xs font-bold px-3 py-1 rounded uppercase">
+                    Nota de Venta (Reimpresión)
+                  </span>
+                  <p className="text-xs font-mono text-gray-600 mt-1">
+                    Ref: #{String(reprintSale.id || '').slice(0, 8).toUpperCase()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {reprintSale.created_at ? new Date(reprintSale.created_at).toLocaleString() : ''}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 bg-gray-50 p-3 rounded border border-gray-200 text-xs">
+                <div>
+                  <p><span className="font-bold">Cliente:</span> {reprintSale.customer || 'Cliente Mostrador'}</p>
+                  <p className="mt-1">
+                    <span className="font-bold">N° Serie:</span>{' '}
+                    <span className="font-mono">{extractSerial(reprintSale) || '—'}</span>
+                  </p>
+                </div>
+                <div>
+                  <p><span className="font-bold">Método / Detalle Pago:</span> {reprintSale.payment_method || 'Contado'}</p>
+                  <p className="mt-1">
+                    <span className="font-bold">Estado:</span>{' '}
+                    {getSalePendingBalance(reprintSale) > 0.009 ? 'Saldo Pendiente' : 'Pagado'}
+                  </p>
+                </div>
+              </div>
+
+              <table className="w-full text-left border-collapse border border-gray-300 text-xs">
+                <thead>
+                  <tr className="bg-gray-100 border-b border-gray-300 font-bold uppercase">
+                    <th className="p-2 border-r border-gray-300 text-center">Cant.</th>
+                    <th className="p-2 border-r border-gray-300">Descripción del Equipo / Producto</th>
+                    <th className="p-2 border-r border-gray-300 text-right">P. Unitario</th>
+                    <th className="p-2 text-right">Subtotal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-300">
+                  <tr>
+                    <td className="p-2 border-r border-gray-300 text-center font-bold">
+                      {Number(reprintSale.quantity || 1)}
+                    </td>
+                    <td className="p-2 border-r border-gray-300 font-semibold">
+                      {cleanProductName(reprintSale.product_name)}
+                    </td>
+                    <td className="p-2 border-r border-gray-300 text-right">
+                      {currency}{' '}
+                      {(
+                        Number(reprintSale.total_amount || 0) /
+                        Math.max(1, Number(reprintSale.quantity || 1))
+                      ).toFixed(2)}
+                    </td>
+                    <td className="p-2 text-right font-semibold">
+                      {currency} {Number(reprintSale.total_amount || 0).toFixed(2)}
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr className="bg-gray-50 font-bold">
+                    <td colSpan={3} className="p-2 border-r border-gray-300 text-right uppercase">
+                      Cobrado:
+                    </td>
+                    <td className="p-2 text-right text-emerald-700">
+                      {currency} {getSalePaidAmount(reprintSale).toFixed(2)}
+                    </td>
+                  </tr>
+                  {getSalePendingBalance(reprintSale) > 0.009 && (
+                    <tr className="bg-amber-50 font-bold">
+                      <td colSpan={3} className="p-2 border-r border-gray-300 text-right uppercase text-amber-900">
+                        Saldo Pendiente:
+                      </td>
+                      <td className="p-2 text-right text-amber-800">
+                        {currency} {getSalePendingBalance(reprintSale).toFixed(2)}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="bg-gray-100 border-t-2 border-gray-800 font-extrabold text-sm">
+                    <td colSpan={3} className="p-2 border-r border-gray-300 text-right uppercase">
+                      Total Nota de Venta:
+                    </td>
+                    <td className="p-2 text-right text-gray-900">
+                      {currency} {Number(reprintSale.total_amount || 0).toFixed(2)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+
+              {(companyDetails.bank_name || companyDetails.account_number) && (
+                <div className="bg-blue-50/60 border border-blue-200 rounded p-2.5 text-[11px] text-gray-700">
+                  <p className="font-bold text-blue-900 uppercase mb-0.5">Datos para Transferencia / Pago:</p>
+                  <p>
+                    {companyDetails.bank_name && <span>Banco: <strong>{companyDetails.bank_name}</strong> · </span>}
+                    {companyDetails.account_number && <span>Cuenta: <strong>{companyDetails.account_number}</strong> · </span>}
+                    {companyDetails.account_holder && <span>Titular: <strong>{companyDetails.account_holder}</strong></span>}
+                  </p>
+                </div>
+              )}
+
+              {companyDetails.warranty_notes && (
+                <div className="border-t pt-2 text-[11px] text-gray-600">
+                  <span className="font-bold">Garantía:</span> {companyDetails.warranty_notes}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4 mt-4 border-t no-print-sale-note">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="bg-gray-900 hover:bg-black text-white px-4 py-2 rounded text-sm font-semibold"
+              >
+                Imprimir Ahora
+              </button>
+              <button
+                type="button"
+                onClick={() => setReprintSale(null)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-semibold"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
