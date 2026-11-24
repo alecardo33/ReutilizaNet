@@ -32,6 +32,13 @@ export default function Inventory() {
   const [items, setItems] = useState<Equipment[]>([])
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [currency, setCurrency] = useState('Bs.')
+  const [companyInfo, setCompanyInfo] = useState({
+    company_name: 'REUTILIZANET',
+    nit: '',
+    address: 'La Paz - Bolivia',
+    phone: '',
+    logo_url: ''
+  })
   const [initialCapital, setInitialCapital] = useState(0)
   const [totalSalesCollected, setTotalSalesCollected] = useState(0)
   const [totalExpenses, setTotalExpenses] = useState(0)
@@ -76,6 +83,53 @@ export default function Inventory() {
   const [filterCategory, setFilterCategory] = useState('Todas')
   const [filterCondition, setFilterCondition] = useState('Todos')
   const [onlyInStock, setOnlyInStock] = useState(false)
+
+  // Modal y Comprobante de Nota de Ingreso de Inventario (Múltiples ítems / Lote)
+  const [entryNoteModalOpen, setEntryNoteModalOpen] = useState(false)
+  const [noteNumber, setNoteNumber] = useState('')
+  const [noteSupplier, setNoteSupplier] = useState('')
+  const [noteReference, setNoteReference] = useState('')
+  const [notePaymentType, setNotePaymentType] = useState<'cash' | 'credit' | 'none'>('cash')
+  const [noteLines, setNoteLines] = useState<Array<{
+    mode: 'new' | 'existing'
+    existingId: string
+    name: string
+    category: string
+    condition: string
+    quantity: number
+    unit_cost: number
+    sale_price: number
+  }>>([
+    {
+      mode: 'new',
+      existingId: '',
+      name: '',
+      category: 'Laptops',
+      condition: 'Reacondicionado - Grado A',
+      quantity: 1,
+      unit_cost: 0,
+      sale_price: 0
+    }
+  ])
+  const [savingEntryNote, setSavingEntryNote] = useState(false)
+  const [printedEntryNote, setPrintedEntryNote] = useState<{
+    note_number: string
+    date: string
+    supplier: string
+    reference: string
+    payment_type: string
+    registered_by: string
+    lines: Array<{
+      name: string
+      category: string
+      condition: string
+      quantity: number
+      unit_cost: number
+      subtotal: number
+    }>
+    total_units: number
+    total_amount: number
+  } | null>(null)
 
   // Modal de Edición de Equipo
   const [editModalOpen, setEditModalOpen] = useState(false)
@@ -177,7 +231,7 @@ export default function Inventory() {
 
     const [invRes, settingsRes] = await Promise.all([
       supabase.from('inventory').select('*').order('created_at', { ascending: false }),
-      supabase.from('company_settings').select('currency, initial_capital').eq('id', 1).single()
+      supabase.from('company_settings').select('currency, initial_capital, company_name, nit, address, phone, logo_url').eq('id', 1).maybeSingle()
     ])
 
     if (!invRes.error && invRes.data) {
@@ -189,6 +243,13 @@ export default function Inventory() {
     }
     if (settingsRes.data) {
       if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
+      setCompanyInfo({
+        company_name: settingsRes.data.company_name || 'REUTILIZANET',
+        nit: settingsRes.data.nit || '',
+        address: settingsRes.data.address || 'La Paz - Bolivia',
+        phone: settingsRes.data.phone || '',
+        logo_url: settingsRes.data.logo_url || ''
+      })
       if (adminCheck) {
         setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
       }
@@ -764,6 +825,240 @@ export default function Inventory() {
     }
   }
 
+  const openEntryNoteModal = () => {
+    const now = new Date()
+    const autoNum = `NI-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    setNoteNumber(autoNum)
+    setNoteSupplier('')
+    setNoteReference('')
+    setNotePaymentType(isAdmin ? 'cash' : 'none')
+    setNoteLines([
+      {
+        mode: 'new',
+        existingId: '',
+        name: '',
+        category: categories[0] || 'Laptops',
+        condition: 'Reacondicionado - Grado A',
+        quantity: 1,
+        unit_cost: 0,
+        sale_price: 0
+      }
+    ])
+    setEntryNoteModalOpen(true)
+  }
+
+  const handleAddNoteLine = () => {
+    setNoteLines(prev => [
+      ...prev,
+      {
+        mode: 'new',
+        existingId: '',
+        name: '',
+        category: categories[0] || 'Laptops',
+        condition: 'Reacondicionado - Grado A',
+        quantity: 1,
+        unit_cost: 0,
+        sale_price: 0
+      }
+    ])
+  }
+
+  const handleRemoveNoteLine = (idx: number) => {
+    if (noteLines.length <= 1) return
+    setNoteLines(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  const handleUpdateNoteLine = (idx: number, field: string, value: any) => {
+    setNoteLines(prev =>
+      prev.map((line, i) => {
+        if (i !== idx) return line
+        if (field === 'mode') {
+          return {
+            ...line,
+            mode: value,
+            existingId: '',
+            name: '',
+            unit_cost: 0,
+            sale_price: 0
+          }
+        }
+        if (field === 'existingId') {
+          const found = items.find(it => it.id === value)
+          if (found) {
+            return {
+              ...line,
+              existingId: value,
+              name: found.name,
+              category: found.category,
+              condition: found.condition,
+              unit_cost: Number(found.cost) || 0,
+              sale_price: Number(found.price) || 0
+            }
+          }
+        }
+        return { ...line, [field]: value }
+      })
+    )
+  }
+
+  const handleConfirmEntryNote = async (e: React.FormEvent) => {
+    e.preventDefault()
+
+    const validLines = noteLines.filter(l =>
+      l.mode === 'existing' ? l.existingId !== '' : l.name.trim() !== ''
+    )
+
+    if (validLines.length === 0) {
+      alert('Agrega al menos un equipo o componente válido en la Nota de Ingreso.')
+      return
+    }
+
+    if (isAdmin && notePaymentType === 'credit' && !noteSupplier.trim()) {
+      alert('Para registrar una Nota de Ingreso a crédito debes especificar el Proveedor / Acreedor.')
+      return
+    }
+
+    setSavingEntryNote(true)
+    const { data: { user } } = await supabase.auth.getUser()
+
+    try {
+      const cleanNoteNum = noteNumber.trim() || `NI-${Date.now().toString().slice(-6)}`
+      const summaryLines: Array<{
+        name: string
+        category: string
+        condition: string
+        quantity: number
+        unit_cost: number
+        subtotal: number
+      }> = []
+
+      for (const line of validLines) {
+        const qtyNum = Math.max(1, Number(line.quantity) || 1)
+        const unitCostNum = canManageCostAndPrice ? Math.max(0, Number(line.unit_cost) || 0) : 0
+        const unitPriceNum = canManageCostAndPrice ? Math.max(0, Number(line.sale_price) || 0) : 0
+        const lineTotalCost = Number((unitCostNum * qtyNum).toFixed(2))
+
+        let finalItemName = line.name.trim()
+        let finalCategory = line.category
+        let finalCondition = line.condition
+
+        if (line.mode === 'new') {
+          const { error: insErr } = await supabase.from('inventory').insert([
+            {
+              name: finalItemName,
+              category: finalCategory,
+              condition: finalCondition,
+              cost: unitCostNum,
+              price: unitPriceNum,
+              stock: qtyNum,
+              created_by: user?.id
+            }
+          ])
+          if (insErr) throw insErr
+        } else {
+          const existingItem = items.find(it => it.id === line.existingId)
+          if (!existingItem) throw new Error('Uno de los ítems seleccionados ya no existe.')
+          finalItemName = existingItem.name
+          finalCategory = existingItem.category
+          finalCondition = existingItem.condition
+
+          const prevVal = existingItem.stock * Number(existingItem.cost || 0)
+          const newStock = existingItem.stock + qtyNum
+          const weightedCost =
+            canManageCostAndPrice && newStock > 0 && unitCostNum > 0
+              ? Number(((prevVal + lineTotalCost) / newStock).toFixed(2))
+              : Number(existingItem.cost || 0)
+
+          const { error: updErr } = await supabase
+            .from('inventory')
+            .update({
+              stock: newStock,
+              cost: weightedCost,
+              price: canManageCostAndPrice && unitPriceNum > 0 ? unitPriceNum : existingItem.price
+            })
+            .eq('id', existingItem.id)
+          if (updErr) throw updErr
+        }
+
+        // Registrar en historial de compras / movimientos de entrada con el número de Nota de Ingreso
+        const shouldRecordPurchase =
+          (isAdmin && notePaymentType !== 'none' && lineTotalCost > 0) ||
+          (!isAdmin && canManageCostAndPrice && (noteSupplier.trim() !== '' || lineTotalCost > 0))
+
+        if (shouldRecordPurchase) {
+          const isCredit = isAdmin && notePaymentType === 'credit'
+          const baseSupplier = noteSupplier.trim() || 'Proveedor General'
+          const refTag = noteReference.trim() ? ` | Ref: ${noteReference.trim()}` : ''
+          const encodedSupplier = isCredit
+            ? `${baseSupplier} [${cleanNoteNum}${refTag}] [Crédito - Pagado: 0.00 | Saldo: ${lineTotalCost.toFixed(2)}]`
+            : `${baseSupplier} [${cleanNoteNum}${refTag}]`
+
+          const payload = {
+            item_name: finalItemName,
+            category: finalCategory,
+            supplier: encodedSupplier,
+            quantity: qtyNum,
+            unit_cost: unitCostNum,
+            total_cost: lineTotalCost,
+            amount_paid: isCredit ? 0 : isAdmin ? lineTotalCost : 0,
+            payment_status: isCredit ? 'Pendiente' : 'Pagado',
+            created_by: user?.id
+          }
+
+          const firstTry = await supabase.from('purchases').insert([payload])
+          if (
+            firstTry.error &&
+            (firstTry.error.message.includes('amount_paid') ||
+              firstTry.error.message.includes('payment_status') ||
+              firstTry.error.message.includes('column'))
+          ) {
+            const { amount_paid, payment_status, ...fallbackPayload } = payload
+            const secondTry = await supabase.from('purchases').insert([fallbackPayload])
+            if (secondTry.error) throw secondTry.error
+          } else if (firstTry.error) {
+            throw firstTry.error
+          }
+        }
+
+        summaryLines.push({
+          name: finalItemName,
+          category: finalCategory,
+          condition: finalCondition,
+          quantity: qtyNum,
+          unit_cost: unitCostNum,
+          subtotal: lineTotalCost
+        })
+      }
+
+      const totalUnits = summaryLines.reduce((s, l) => s + l.quantity, 0)
+      const totalAmount = Number(summaryLines.reduce((s, l) => s + l.subtotal, 0).toFixed(2))
+
+      setPrintedEntryNote({
+        note_number: cleanNoteNum,
+        date: new Date().toLocaleString(),
+        supplier: noteSupplier.trim() || 'Ingreso Interno / Proveedor General',
+        reference: noteReference.trim(),
+        payment_type:
+          notePaymentType === 'cash'
+            ? 'Contado (Descontado de Capital)'
+            : notePaymentType === 'credit'
+            ? 'A Crédito (Cuenta por Pagar)'
+            : 'Ingreso Directo a Almacén (Sin movimiento de caja)',
+        registered_by: user?.email || 'Operador Autorizado',
+        lines: summaryLines,
+        total_units: totalUnits,
+        total_amount: totalAmount
+      })
+
+      setEntryNoteModalOpen(false)
+      await fetchInventoryAndCapital()
+    } catch (err: any) {
+      alert('Error al procesar la Nota de Ingreso: ' + err.message)
+    } finally {
+      setSavingEntryNote(false)
+    }
+  }
+
   const handleLogout = async () => {
     await supabase.auth.signOut()
     navigate('/login')
@@ -826,7 +1121,12 @@ export default function Inventory() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            
+            <button
+              onClick={openEntryNoteModal}
+              className="bg-emerald-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-emerald-700 shadow-sm transition flex items-center gap-1.5"
+            >
+              <span>+ Nota de Ingreso</span>
+            </button>
             {isAdmin && (
               <>
                 <button onClick={() => navigate('/')} className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
@@ -1889,6 +2189,380 @@ export default function Inventory() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Modal de Formulario: Nota de Ingreso de Inventario (Múltiples Ítems) */}
+      {entryNoteModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full p-6 border border-gray-200 my-8">
+            <div className="flex justify-between items-start border-b pb-3 mb-4">
+              <div>
+                <h3 className="text-xl font-bold text-gray-900">Nueva Nota de Ingreso de Inventario</h3>
+                <p className="text-xs text-gray-500">
+                  Registra el ingreso de uno o varios equipos/componentes al stock y genera su comprobante imprimible.
+                </p>
+              </div>
+              <span className="bg-emerald-100 text-emerald-800 text-xs font-mono font-bold px-3 py-1 rounded">
+                {noteNumber}
+              </span>
+            </div>
+
+            <form onSubmit={handleConfirmEntryNote} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-gray-50 p-3.5 rounded-lg border border-gray-200">
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">N° Nota de Ingreso</label>
+                  <input
+                    type="text"
+                    value={noteNumber}
+                    onChange={e => setNoteNumber(e.target.value)}
+                    required
+                    className="w-full border border-gray-300 p-2 rounded text-xs font-mono font-bold bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">
+                    Proveedor / Origen {isAdmin && notePaymentType === 'credit' ? '*' : '(Opcional)'}
+                  </label>
+                  <input
+                    type="text"
+                    value={noteSupplier}
+                    onChange={e => setNoteSupplier(e.target.value)}
+                    required={isAdmin && notePaymentType === 'credit'}
+                    placeholder="Ej: Importadora Tech / Lote #4"
+                    className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">N° Factura / Guía / Obs.</label>
+                  <input
+                    type="text"
+                    value={noteReference}
+                    onChange={e => setNoteReference(e.target.value)}
+                    placeholder="Ej: Fact. 00451 / Entrega directa"
+                    className="w-full border border-gray-300 p-2 rounded text-xs bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">Afectación Contable</label>
+                  <select
+                    value={notePaymentType}
+                    onChange={e => setNotePaymentType(e.target.value as 'cash' | 'credit' | 'none')}
+                    className="w-full border border-gray-300 p-2 rounded text-xs font-semibold bg-white"
+                  >
+                    {isAdmin && <option value="cash">Contado (Descuenta Capital)</option>}
+                    {isAdmin && <option value="credit">A Crédito (Cuenta por Pagar)</option>}
+                    <option value="none">Ingreso Directo a Stock (Sin caja)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-gray-800 uppercase">Detalle de Equipos / Piezas que Ingresan</span>
+                  <button
+                    type="button"
+                    onClick={handleAddNoteLine}
+                    className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded transition"
+                  >
+                    + Agregar Fila
+                  </button>
+                </div>
+
+                {noteLines.map((line, idx) => (
+                  <div key={idx} className="bg-white border border-gray-300 p-3 rounded-lg shadow-sm space-y-2.5">
+                    <div className="flex flex-wrap justify-between items-center gap-2 border-b border-gray-100 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-500">#{idx + 1}</span>
+                        <select
+                          value={line.mode}
+                          onChange={e => handleUpdateNoteLine(idx, 'mode', e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs font-semibold bg-gray-50"
+                        >
+                          <option value="new">Ítem Nuevo en Catálogo</option>
+                          <option value="existing">Sumar a Ítem Existente</option>
+                        </select>
+                      </div>
+                      {noteLines.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveNoteLine(idx)}
+                          className="text-xs text-red-600 hover:text-red-800 font-semibold"
+                        >
+                          Quitar fila ✕
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-end">
+                      {line.mode === 'existing' ? (
+                        <div className="md:col-span-5">
+                          <label className="block text-[11px] font-semibold text-gray-600 mb-1">Equipo / Pieza Existente</label>
+                          <select
+                            value={line.existingId}
+                            onChange={e => handleUpdateNoteLine(idx, 'existingId', e.target.value)}
+                            required
+                            className="w-full border border-gray-300 p-1.5 rounded text-xs bg-white"
+                          >
+                            <option value="">-- Seleccionar del inventario --</option>
+                            {items.map(it => (
+                              <option key={it.id} value={it.id}>
+                                {it.name} (Stock actual: {it.stock})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="md:col-span-3">
+                            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Descripción</label>
+                            <input
+                              type="text"
+                              value={line.name}
+                              onChange={e => handleUpdateNoteLine(idx, 'name', e.target.value)}
+                              required
+                              placeholder="Ej: Dell Latitude 5490 i5"
+                              className="w-full border border-gray-300 p-1.5 rounded text-xs"
+                            />
+                          </div>
+                          <div className="md:col-span-2">
+                            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Categoría</label>
+                            <select
+                              value={line.category}
+                              onChange={e => handleUpdateNoteLine(idx, 'category', e.target.value)}
+                              className="w-full border border-gray-300 p-1.5 rounded text-xs bg-white"
+                            >
+                              {categories.map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </>
+                      )}
+
+                      <div className="md:col-span-2">
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">Estado</label>
+                        <select
+                          value={line.condition}
+                          onChange={e => handleUpdateNoteLine(idx, 'condition', e.target.value)}
+                          disabled={line.mode === 'existing'}
+                          className="w-full border border-gray-300 p-1.5 rounded text-xs bg-white disabled:bg-gray-100"
+                        >
+                          <option value="Reacondicionado - Grado A">Grado A</option>
+                          <option value="Usado - Buen estado">Buen estado</option>
+                          <option value="En taller / Para reparación">Para reparación</option>
+                          <option value="Para repuestos">Para repuestos</option>
+                        </select>
+                      </div>
+
+                      <div className="md:col-span-1">
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">Cant.</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={line.quantity}
+                          onChange={e => handleUpdateNoteLine(idx, 'quantity', Math.max(1, Number(e.target.value) || 1))}
+                          required
+                          className="w-full border border-gray-300 p-1.5 rounded text-xs text-center font-bold"
+                        />
+                      </div>
+
+                      {canManageCostAndPrice && (
+                        <>
+                          <div className="md:col-span-2">
+                            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Costo Unit. ({currency})</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={line.unit_cost}
+                              onChange={e => handleUpdateNoteLine(idx, 'unit_cost', Number(e.target.value) || 0)}
+                              className="w-full border border-gray-300 p-1.5 rounded text-xs"
+                            />
+                          </div>
+                          <div className="md:col-span-2">
+                            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Precio Venta ({currency})</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={line.sale_price}
+                              onChange={e => handleUpdateNoteLine(idx, 'sale_price', Number(e.target.value) || 0)}
+                              className="w-full border border-gray-300 p-1.5 rounded text-xs font-semibold text-green-700"
+                            />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-lg flex flex-wrap justify-between items-center text-sm">
+                <div>
+                  <span className="text-gray-700 font-medium">Total Unidades a Ingresar: </span>
+                  <span className="font-bold text-gray-900">
+                    {noteLines.reduce((acc, l) => acc + Math.max(1, Number(l.quantity) || 1), 0)} unid.
+                  </span>
+                </div>
+                {canManageCostAndPrice && (
+                  <div>
+                    <span className="text-gray-700 font-medium">Valor Total Nota: </span>
+                    <span className="font-extrabold text-emerald-800 text-base">
+                      {currency}{' '}
+                      {noteLines
+                        .reduce(
+                          (acc, l) =>
+                            acc + Math.max(1, Number(l.quantity) || 1) * (Number(l.unit_cost) || 0),
+                          0
+                        )
+                        .toFixed(2)}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => setEntryNoteModalOpen(false)}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded text-sm hover:bg-gray-300 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEntryNote}
+                  className="px-5 py-2 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-700 font-bold shadow"
+                >
+                  {savingEntryNote ? 'Procesando Ingreso...' : 'Registrar y Generar Nota de Ingreso'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Imprimible: Comprobante Nota de Ingreso de Inventario */}
+      {printedEntryNote && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-2xl max-w-2xl w-full p-6 border border-gray-300 my-8">
+            <style>{`
+              @media print {
+                body * { visibility: hidden; }
+                #printable-entry-note, #printable-entry-note * { visibility: visible; }
+                #printable-entry-note { position: absolute; left: 0; top: 0; width: 100%; padding: 20px; }
+                .no-print-note { display: none !important; }
+              }
+            `}</style>
+
+            <div id="printable-entry-note" className="space-y-4 text-gray-900">
+              <div className="flex justify-between items-start border-b-2 border-gray-800 pb-4">
+                <div className="flex items-center gap-3">
+                  {companyInfo.logo_url && (
+                    <img src={companyInfo.logo_url} alt="Logo" className="w-14 h-14 object-contain" />
+                  )}
+                  <div>
+                    <h2 className="text-xl font-extrabold uppercase tracking-wide">{companyInfo.company_name}</h2>
+                    {companyInfo.nit && <p className="text-xs text-gray-600">NIT: {companyInfo.nit}</p>}
+                    <p className="text-xs text-gray-600">{companyInfo.address}</p>
+                    {companyInfo.phone && <p className="text-xs text-gray-600">Tel: {companyInfo.phone}</p>}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block bg-gray-900 text-white text-xs font-bold px-3 py-1 rounded uppercase">
+                    Nota de Ingreso a Almacén
+                  </span>
+                  <p className="text-sm font-mono font-extrabold text-emerald-700 mt-1">
+                    {printedEntryNote.note_number}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">{printedEntryNote.date}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 bg-gray-50 p-3 rounded border border-gray-200 text-xs">
+                <div>
+                  <p><span className="font-bold">Proveedor / Origen:</span> {printedEntryNote.supplier}</p>
+                  {printedEntryNote.reference && (
+                    <p className="mt-1"><span className="font-bold">Referencia / Doc.:</span> {printedEntryNote.reference}</p>
+                  )}
+                </div>
+                <div>
+                  <p><span className="font-bold">Modalidad:</span> {printedEntryNote.payment_type}</p>
+                  <p className="mt-1"><span className="font-bold">Registrado por:</span> {printedEntryNote.registered_by}</p>
+                </div>
+              </div>
+
+              <table className="w-full text-left border-collapse border border-gray-300 text-xs">
+                <thead>
+                  <tr className="bg-gray-100 border-b border-gray-300 font-bold uppercase">
+                    <th className="p-2 border-r border-gray-300 text-center">Cant.</th>
+                    <th className="p-2 border-r border-gray-300">Descripción del Equipo / Pieza</th>
+                    <th className="p-2 border-r border-gray-300">Categoría / Estado</th>
+                    {canManageCostAndPrice && (
+                      <>
+                        <th className="p-2 border-r border-gray-300 text-right">Costo Unit.</th>
+                        <th className="p-2 text-right">Subtotal</th>
+                      </>
+                    )}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-300">
+                  {printedEntryNote.lines.map((l, idx) => (
+                    <tr key={idx}>
+                      <td className="p-2 border-r border-gray-300 text-center font-bold">{l.quantity}</td>
+                      <td className="p-2 border-r border-gray-300 font-semibold">{l.name}</td>
+                      <td className="p-2 border-r border-gray-300 text-gray-600">{l.category} ({l.condition})</td>
+                      {canManageCostAndPrice && (
+                        <>
+                          <td className="p-2 border-r border-gray-300 text-right">{currency} {l.unit_cost.toFixed(2)}</td>
+                          <td className="p-2 text-right font-semibold">{currency} {l.subtotal.toFixed(2)}</td>
+                        </>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-gray-100 border-t-2 border-gray-800 font-bold">
+                    <td className="p-2 border-r border-gray-300 text-center">{printedEntryNote.total_units}</td>
+                    <td colSpan={canManageCostAndPrice ? 3 : 2} className="p-2 text-right uppercase">
+                      {canManageCostAndPrice ? 'Total Ingreso Valorizado:' : 'Total Unidades Ingresadas'}
+                    </td>
+                    {canManageCostAndPrice && (
+                      <td className="p-2 text-right text-sm font-extrabold text-emerald-800">
+                        {currency} {printedEntryNote.total_amount.toFixed(2)}
+                      </td>
+                    )}
+                  </tr>
+                </tfoot>
+              </table>
+
+              <div className="grid grid-cols-2 gap-8 pt-10 text-center text-xs text-gray-600">
+                <div>
+                  <div className="border-t border-gray-500 pt-1 mx-6">Entregado por (Proveedor / Taller)</div>
+                </div>
+                <div>
+                  <div className="border-t border-gray-500 pt-1 mx-6">Recibido Conforme (Almacén / Encargado)</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4 mt-4 border-t no-print-note">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="bg-gray-900 hover:bg-black text-white px-4 py-2 rounded text-sm font-semibold"
+              >
+                Imprimir Nota de Ingreso
+              </button>
+              <button
+                type="button"
+                onClick={() => setPrintedEntryNote(null)}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm font-semibold"
+              >
+                Listo / Cerrar
+              </button>
+            </div>
           </div>
         </div>
       )}
