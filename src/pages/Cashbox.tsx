@@ -29,6 +29,19 @@ interface SaleReceipt {
   changeAmount: number;
 }
 
+interface CompanyConfig {
+  companyName: string;
+  nit: string;
+  address: string;
+  phone: string;
+  logoUrl: string;
+  qrUrl: string;
+  bankName: string;
+  accountNumber: string;
+  accountHolder: string;
+  warrantyNotes: string;
+}
+
 export default function Cashbox() {
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -39,10 +52,69 @@ export default function Cashbox() {
   const [loading, setLoading] = useState(false);
   const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
+  const [totalIncome, setTotalIncome] = useState<number>(0);
+  const [sessionIncome, setSessionIncome] = useState<number>(0);
+  const [companyConfig, setCompanyConfig] = useState<CompanyConfig>({
+    companyName: 'ReutilizaNet',
+    nit: '',
+    address: 'La Paz - Bolivia',
+    phone: '',
+    logoUrl: '',
+    qrUrl: '',
+    bankName: '',
+    accountNumber: '',
+    accountHolder: '',
+    warrantyNotes: ''
+  });
 
   useEffect(() => {
     fetchProducts();
+    fetchSalesIncome();
+    fetchCompanyConfig();
   }, []);
+
+  const fetchCompanyConfig = async () => {
+    const { data, error } = await supabase
+      .from('company_settings')
+      .select('*')
+      .eq('id', 1)
+      .maybeSingle();
+
+    if (!error && data) {
+      const row: any = data;
+      const qrCandidate =
+        row.qr_url ||
+        row.qr_image_url ||
+        row.qr_code_url ||
+        row.qr_image ||
+        row.payment_qr_url ||
+        '';
+
+      setCompanyConfig({
+        companyName: row.company_name || 'ReutilizaNet',
+        nit: row.nit || '',
+        address: row.address || 'La Paz - Bolivia',
+        phone: row.phone || '',
+        logoUrl: row.logo_url || '',
+        qrUrl: String(qrCandidate || ''),
+        bankName: row.bank_name || '',
+        accountNumber: row.account_number || '',
+        accountHolder: row.account_holder || '',
+        warrantyNotes: row.warranty_notes || ''
+      });
+    }
+  };
+
+  const fetchSalesIncome = async () => {
+    const { data, error } = await supabase.from('sales').select('total, total_amount, amount_paid');
+    if (!error && Array.isArray(data)) {
+      const sum = data.reduce((acc, row: any) => {
+        const val = Number(row?.amount_paid ?? row?.total_amount ?? row?.total ?? 0);
+        return acc + (isNaN(val) ? 0 : val);
+      }, 0);
+      setTotalIncome(sum);
+    }
+  };
 
   const fetchProducts = async () => {
     const { data, error } = await supabase.from('products').select('*');
@@ -76,6 +148,14 @@ export default function Cashbox() {
       : (Number(amountPaid) || totalAmount);
   const changeAmount =
     paymentMethod === 'efectivo' ? Math.max(0, numericAmountPaid - totalAmount) : 0;
+
+  const formatPaymentMethodLabel = (method: string) => {
+    const m = String(method || '').toLowerCase();
+    if (m === 'efectivo') return 'Efectivo';
+    if (m === 'qr') return 'Pago QR';
+    if (m === 'transferencia') return 'Transferencia';
+    return method || 'Efectivo';
+  };
 
   const handleProcessSale = async () => {
     if (cart.length === 0) {
@@ -140,6 +220,10 @@ export default function Cashbox() {
         changeAmount: snapshotChange
       };
 
+      const incomeAdded = paymentMethod === 'efectivo' ? snapshotTotal : snapshotPaid;
+      setSessionIncome(prev => Number((prev + incomeAdded).toFixed(2)));
+      setTotalIncome(prev => Number((prev + incomeAdded).toFixed(2)));
+
       setReceipt(generatedReceipt);
       setLastReceipt(generatedReceipt);
 
@@ -147,6 +231,7 @@ export default function Cashbox() {
       setAmountPaid('');
       setClientName('');
       fetchProducts();
+      fetchSalesIncome();
 
     } catch (err: any) {
       console.error('Error al procesar la venta:', err);
@@ -160,10 +245,25 @@ export default function Cashbox() {
     p.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const isQrOrTransfer = (method?: string) => {
+    const m = String(method || '').toLowerCase();
+    return m === 'qr' || m === 'transferencia';
+  };
+
   return (
     <div className="p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
       {/* Catálogo de Productos */}
       <div className="lg:col-span-2 bg-white p-4 rounded-xl shadow">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
+          <div>
+            <p className="text-xs font-semibold uppercase text-emerald-800">Ingresos de esta sesión en Caja</p>
+            <p className="text-xl font-extrabold text-emerald-700">+ Bs. {sessionIncome.toFixed(2)}</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase text-gray-600">Total Ingresos Acumulados (Ventas)</p>
+            <p className="text-xl font-extrabold text-gray-900">Bs. {totalIncome.toFixed(2)}</p>
+          </div>
+        </div>
         <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
           <h2 className="text-xl font-bold">Catálogo de Productos</h2>
           {lastReceipt && (
@@ -285,8 +385,8 @@ export default function Cashbox() {
 
       {/* Modal Nota de Venta Automática al Completar Venta */}
       {receipt && (
-        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-gray-200">
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-gray-200 my-8">
             <style>{`
               @media print {
                 body * { visibility: hidden; }
@@ -298,20 +398,40 @@ export default function Cashbox() {
 
             <div id="cashbox-sale-note" className="space-y-4 text-gray-900">
               <div className="flex justify-between items-start border-b-2 border-gray-800 pb-3">
-                <div>
-                  <h2 className="text-lg font-extrabold uppercase">Nota de Venta</h2>
-                  <p className="text-xs text-gray-500 font-mono">
+                <div className="flex items-center gap-2.5">
+                  {companyConfig.logoUrl && (
+                    <img src={companyConfig.logoUrl} alt="Logo" className="w-11 h-11 object-contain" />
+                  )}
+                  <div>
+                    <h2 className="text-lg font-extrabold uppercase">{companyConfig.companyName}</h2>
+                    {companyConfig.nit && <p className="text-[11px] text-gray-600">NIT: {companyConfig.nit}</p>}
+                    {companyConfig.address && <p className="text-[11px] text-gray-600">{companyConfig.address}</p>}
+                    {companyConfig.phone && <p className="text-[11px] text-gray-600">Tel: {companyConfig.phone}</p>}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block bg-gray-900 text-white text-[11px] font-bold px-2.5 py-0.5 rounded uppercase">
+                    Nota de Venta
+                  </span>
+                  <p className="text-xs text-gray-500 font-mono mt-1">
                     Ref: #{String(receipt.id).slice(0, 8).toUpperCase()}
                   </p>
-                </div>
-                <div className="text-right text-xs text-gray-600">
-                  <p>{new Date(receipt.createdAt).toLocaleString()}</p>
-                  <p className="font-semibold uppercase mt-0.5">Pago: {receipt.paymentMethod}</p>
+                  <p className="text-[11px] text-gray-600 mt-0.5">
+                    {new Date(receipt.createdAt).toLocaleString()}
+                  </p>
                 </div>
               </div>
 
-              <div className="text-xs bg-gray-50 p-2.5 rounded border">
-                <span className="font-bold">Cliente:</span> {receipt.clientName}
+              <div className="flex flex-wrap justify-between gap-2 text-xs bg-gray-50 p-2.5 rounded border">
+                <div>
+                  <span className="font-bold">Cliente:</span> {receipt.clientName}
+                </div>
+                <div>
+                  <span className="font-bold">Modo de Pago:</span>{' '}
+                  <span className="font-semibold uppercase">
+                    {formatPaymentMethodLabel(receipt.paymentMethod)}
+                  </span>
+                </div>
               </div>
 
               <table className="w-full text-left border-collapse border border-gray-300 text-xs">
@@ -350,6 +470,51 @@ export default function Cashbox() {
                   </tr>
                 </tfoot>
               </table>
+
+              {/* Datos de Pago QR / Transferencia desde Configuración */}
+              {(isQrOrTransfer(receipt.paymentMethod) || companyConfig.bankName || companyConfig.accountNumber || companyConfig.qrUrl) && (
+                <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-3 text-xs space-y-2">
+                  <p className="font-bold text-blue-950 uppercase">
+                    Datos de Pago ({formatPaymentMethodLabel(receipt.paymentMethod)})
+                  </p>
+
+                  {(companyConfig.bankName || companyConfig.accountNumber || companyConfig.accountHolder) && (
+                    <div className="text-gray-800 space-y-0.5">
+                      {companyConfig.bankName && (
+                        <p><span className="font-semibold">Banco:</span> {companyConfig.bankName}</p>
+                      )}
+                      {companyConfig.accountNumber && (
+                        <p><span className="font-semibold">N° Cuenta:</span> <span className="font-mono">{companyConfig.accountNumber}</span></p>
+                      )}
+                      {companyConfig.accountHolder && (
+                        <p><span className="font-semibold">Titular:</span> {companyConfig.accountHolder}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {receipt.paymentMethod === 'qr' && (
+                    <div className="flex flex-col items-center justify-center pt-1">
+                      {companyConfig.qrUrl ? (
+                        <img
+                          src={companyConfig.qrUrl}
+                          alt="Código QR de Pago"
+                          className="w-36 h-36 object-contain bg-white p-1.5 border rounded"
+                        />
+                      ) : (
+                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2.5 py-1">
+                          Configura tu imagen QR o datos bancarios en el módulo <strong>Configuración</strong>.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {companyConfig.warrantyNotes && (
+                <div className="border-t pt-2 text-[11px] text-gray-600">
+                  <span className="font-bold">Garantía:</span> {companyConfig.warrantyNotes}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 mt-4 pt-3 border-t no-print-note">
