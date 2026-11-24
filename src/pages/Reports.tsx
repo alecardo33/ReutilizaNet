@@ -258,7 +258,7 @@ export default function Reports() {
     return Math.max(0, Number((total - paid).toFixed(2)))
   }
 
-  const isAdmin = userRole === 'admin'
+  const isAdmin = String(userRole || '').trim().toLowerCase() === 'admin'
 
   const restoreInventoryForSale = async (sale: SaleRecord) => {
     const qty = Math.max(0, Number(sale.quantity) || 0)
