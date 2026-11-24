@@ -88,6 +88,9 @@ export default function Reports() {
   const [companyName, setCompanyName] = useState('ReutilizaNet')
   const [logoUrl, setLogoUrl] = useState('')
   const [loading, setLoading] = useState(true)
+  const [userRole, setUserRole] = useState<string>('')
+  const [saleActionLoadingId, setSaleActionLoadingId] = useState<string | null>(null)
+  const [saleActionMessage, setSaleActionMessage] = useState<string>('')
 
   // Pestaña activa de reportes
   const [reportTab, setReportTab] = useState<'capital_expenses' | 'sales' | 'purchases' | 'stock' | 'kardex'>('capital_expenses')
@@ -106,6 +109,17 @@ export default function Reports() {
   const fetchFinancialData = async () => {
     setLoading(true)
     try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle()
+        if (profile?.role) {
+          setUserRole(profile.role)
+        }
+      }
       const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('inventory').select('*').order('name', { ascending: true }),
@@ -196,6 +210,94 @@ export default function Reports() {
     const total = Number(sale.total_amount) || 0
     const paid = getSalePaidAmount(sale)
     return Math.max(0, Number((total - paid).toFixed(2)))
+  }
+
+  const isAdmin = userRole === 'admin'
+
+  const restoreInventoryForSale = async (sale: SaleRecord) => {
+    const qty = Math.max(0, Number(sale.quantity) || 0)
+    if (qty <= 0) return
+
+    let matchedItem: InventoryItem | undefined
+    if (sale.inventory_id) {
+      matchedItem = inventoryItems.find(i => i.id === sale.inventory_id)
+    }
+    if (!matchedItem) {
+      const cleanName = cleanProductName(sale.product_name).toLowerCase()
+      matchedItem = inventoryItems.find(i => i.name?.toLowerCase() === cleanName)
+    }
+
+    if (matchedItem) {
+      const restoredStock = Number(matchedItem.stock || 0) + qty
+      const { error: invErr } = await supabase
+        .from('inventory')
+        .update({ stock: restoredStock })
+        .eq('id', matchedItem.id)
+      if (invErr) throw invErr
+    }
+  }
+
+  const handleAnnulSale = async (sale: SaleRecord) => {
+    if (!isAdmin) {
+      alert('Solo el usuario Administrador puede anular ventas.')
+      return
+    }
+    const label = `${cleanProductName(sale.product_name)} (${currency} ${Number(sale.total_amount || 0).toFixed(2)})`
+    const confirmed = window.confirm(
+      `¿Anular la venta "${label}"?\n\nSe eliminará el registro de venta y se devolverán ${Number(sale.quantity || 0)} unidad(es) al inventario si el ítem existe.`
+    )
+    if (!confirmed) return
+
+    setSaleActionLoadingId(sale.id)
+    setSaleActionMessage('')
+    try {
+      await restoreInventoryForSale(sale)
+
+      const { error: delErr } = await supabase
+        .from('sales')
+        .delete()
+        .eq('id', sale.id)
+
+      if (delErr) throw delErr
+
+      setSales(prev => prev.filter(s => s.id !== sale.id))
+      setSaleActionMessage(`Venta "${cleanProductName(sale.product_name)}" anulada y stock devuelto al inventario.`)
+      await fetchFinancialData()
+    } catch (err: any) {
+      alert('Error al anular la venta: ' + (err?.message || 'Error desconocido'))
+    } finally {
+      setSaleActionLoadingId(null)
+    }
+  }
+
+  const handleDeleteSaleOnly = async (sale: SaleRecord) => {
+    if (!isAdmin) {
+      alert('Solo el usuario Administrador puede eliminar ventas.')
+      return
+    }
+    const label = `${cleanProductName(sale.product_name)} (${currency} ${Number(sale.total_amount || 0).toFixed(2)})`
+    const confirmed = window.confirm(
+      `¿Eliminar permanentemente el registro de venta "${label}" SIN modificar el inventario?`
+    )
+    if (!confirmed) return
+
+    setSaleActionLoadingId(sale.id)
+    setSaleActionMessage('')
+    try {
+      const { error: delErr } = await supabase
+        .from('sales')
+        .delete()
+        .eq('id', sale.id)
+
+      if (delErr) throw delErr
+
+      setSales(prev => prev.filter(s => s.id !== sale.id))
+      setSaleActionMessage(`Registro de venta "${cleanProductName(sale.product_name)}" eliminado sin alterar el inventario.`)
+    } catch (err: any) {
+      alert('Error al eliminar la venta: ' + (err?.message || 'Error desconocido'))
+    } finally {
+      setSaleActionLoadingId(null)
+    }
   }
 
   const handleLogout = async () => {
@@ -574,6 +676,19 @@ export default function Reports() {
           </div>
         </div>
 
+        {saleActionMessage && (
+          <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 px-4 py-3 rounded-lg mb-4 text-sm font-medium flex justify-between items-center no-print">
+            <span>{saleActionMessage}</span>
+            <button
+              type="button"
+              onClick={() => setSaleActionMessage('')}
+              className="text-xs font-bold underline ml-4"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
+
         {/* Pestañas de Reportes Específicos */}
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="flex flex-wrap gap-2 border-b pb-4 mb-5 no-print">
@@ -775,6 +890,7 @@ export default function Reports() {
                         <th className="p-3">Cobrado</th>
                         <th className="p-3">Saldo</th>
                         <th className="p-3">Margen</th>
+                        {isAdmin && <th className="p-3 text-center no-print">Acciones</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y text-sm text-gray-700">
@@ -808,6 +924,30 @@ export default function Reports() {
                             <td className={`p-3 font-bold ${profit >= 0 ? 'text-green-700' : 'text-red-600'}`}>
                               {profit >= 0 ? '+' : ''}{currency} {profit.toFixed(2)}
                             </td>
+                            {isAdmin && (
+                              <td className="p-3 text-center whitespace-nowrap no-print">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    disabled={saleActionLoadingId === item.id}
+                                    onClick={() => handleAnnulSale(item)}
+                                    title="Anular venta y devolver stock al inventario"
+                                    className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
+                                  >
+                                    {saleActionLoadingId === item.id ? '...' : 'Anular'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={saleActionLoadingId === item.id}
+                                    onClick={() => handleDeleteSaleOnly(item)}
+                                    title="Eliminar registro de venta sin tocar el inventario"
+                                    className="bg-red-100 hover:bg-red-200 text-red-700 text-xs font-semibold px-2.5 py-1 rounded transition disabled:opacity-50"
+                                  >
+                                    Eliminar
+                                  </button>
+                                </div>
+                              </td>
+                            )}
                           </tr>
                         )
                       })}
