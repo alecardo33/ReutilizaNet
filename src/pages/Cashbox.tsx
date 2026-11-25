@@ -33,6 +33,15 @@ interface SaleReceipt {
   changeAmount: number;
 }
 
+interface ExpenseRecord {
+  id: string;
+  category: 'Salarios' | 'Servicios' | 'Otros' | string;
+  description: string;
+  amount: number;
+  payment_method: string;
+  created_at: string;
+}
+
 interface CompanyConfig {
   companyName: string;
   nit: string;
@@ -47,6 +56,8 @@ interface CompanyConfig {
 }
 
 type UserRole = 'administrador' | 'vendedor' | 'contabilidad' | 'técnico' | 'tecnico' | string;
+
+const LOCAL_EXPENSES_KEY = 'reutilizanet_cashbox_expenses';
 
 export default function Cashbox() {
   const navigate = useNavigate();
@@ -63,6 +74,15 @@ export default function Cashbox() {
   const [totalIncome, setTotalIncome] = useState<number>(0);
   const [sessionIncome, setSessionIncome] = useState<number>(0);
   const [userRole, setUserRole] = useState<UserRole>('administrador');
+
+  // Estados para Egresos / Pagos (Salarios, Servicios y Otros)
+  const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
+  const [expenseCategory, setExpenseCategory] = useState<'Salarios' | 'Servicios' | 'Otros'>('Salarios');
+  const [expenseDescription, setExpenseDescription] = useState('');
+  const [expenseAmount, setExpenseAmount] = useState('');
+  const [expensePaymentMethod, setExpensePaymentMethod] = useState('efectivo');
+  const [expenseLoading, setExpenseLoading] = useState(false);
+
   const [companyConfig, setCompanyConfig] = useState<CompanyConfig>({
     companyName: 'ReutilizaNet',
     nit: '',
@@ -80,6 +100,7 @@ export default function Cashbox() {
     fetchUserRole();
     fetchProducts();
     fetchSalesIncome();
+    fetchExpenses();
     fetchCompanyConfig();
   }, []);
 
@@ -163,6 +184,119 @@ export default function Cashbox() {
     }
   };
 
+  const loadLocalExpenses = (): ExpenseRecord[] => {
+    try {
+      const raw = localStorage.getItem(LOCAL_EXPENSES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveLocalExpenses = (list: ExpenseRecord[]) => {
+    try {
+      localStorage.setItem(LOCAL_EXPENSES_KEY, JSON.stringify(list));
+    } catch {
+      // Ignorar errores de cuota de almacenamiento
+    }
+  };
+
+  const fetchExpenses = async () => {
+    const { data, error } = await supabase
+      .from('expenses')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!error && Array.isArray(data)) {
+      const mapped: ExpenseRecord[] = data.map((row: any) => ({
+        id: String(row.id),
+        category: row.category || row.type || 'Otros',
+        description: row.description || row.concept || row.detail || 'Pago registrado',
+        amount: Number(row.amount ?? row.total ?? 0) || 0,
+        payment_method: row.payment_method || 'efectivo',
+        created_at: row.created_at || new Date().toISOString()
+      }));
+      setExpenses(mapped);
+      saveLocalExpenses(mapped);
+      return;
+    }
+
+    setExpenses(loadLocalExpenses());
+  };
+
+  const handleRegisterExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const numericAmount = Number(expenseAmount);
+    if (!expenseDescription.trim()) {
+      alert('Ingresa una descripción o nombre del beneficiario.');
+      return;
+    }
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      alert('Ingresa un monto válido mayor a 0.');
+      return;
+    }
+
+    setExpenseLoading(true);
+    const nowIso = new Date().toISOString();
+    const cleanDescription = expenseDescription.trim();
+
+    try {
+      const payload = {
+        category: expenseCategory,
+        description: cleanDescription,
+        amount: Number(numericAmount.toFixed(2)),
+        payment_method: expensePaymentMethod,
+        created_at: nowIso
+      };
+
+      const { data, error } = await supabase
+        .from('expenses')
+        .insert([payload])
+        .select()
+        .maybeSingle();
+
+      const newRecord: ExpenseRecord = {
+        id: data?.id ? String(data.id) : `exp-${Date.now()}`,
+        category: expenseCategory,
+        description: cleanDescription,
+        amount: Number(numericAmount.toFixed(2)),
+        payment_method: expensePaymentMethod,
+        created_at: data?.created_at || nowIso
+      };
+
+      if (error) {
+        // Respaldo local si la tabla expenses aún no existe o tiene restricciones
+        const updatedLocal = [newRecord, ...expenses];
+        setExpenses(updatedLocal);
+        saveLocalExpenses(updatedLocal);
+        setSuccessBanner(
+          `Egreso registrado en sesión (${expenseCategory}: Bs. ${numericAmount.toFixed(2)}).`
+        );
+      } else {
+        await fetchExpenses();
+        setSuccessBanner(
+          `Egreso registrado correctamente (${expenseCategory}: Bs. ${numericAmount.toFixed(2)}).`
+        );
+      }
+
+      setExpenseDescription('');
+      setExpenseAmount('');
+    } finally {
+      setExpenseLoading(false);
+    }
+  };
+
+  const handleDeleteExpense = async (id: string) => {
+    if (!window.confirm('¿Eliminar este registro de egreso?')) return;
+
+    await supabase.from('expenses').delete().eq('id', id);
+    const updated = expenses.filter(item => item.id !== id);
+    setExpenses(updated);
+    saveLocalExpenses(updated);
+  };
+
   const mapRowsToProducts = (
     rows: any[],
     sourceTable: 'inventory' | 'products'
@@ -227,6 +361,9 @@ export default function Cashbox() {
   };
 
   const totalAmount = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const totalExpenses = expenses.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const netBalance = totalIncome - totalExpenses;
+
   const numericAmountPaid =
     paymentMethod === 'efectivo'
       ? Number(amountPaid) || 0
@@ -460,7 +597,7 @@ export default function Cashbox() {
   );
 
   return (
-    <div className="space-y-4 max-w-7xl mx-auto p-4">
+    <div className="space-y-6 max-w-7xl mx-auto p-4">
       <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-xl shadow border border-gray-100 gap-4">
         <div className="flex items-center gap-3">
           {companyConfig.logoUrl && (
@@ -475,7 +612,7 @@ export default function Cashbox() {
               Módulo de Caja y Ventas — {companyConfig.companyName}
             </h1>
             <p className="text-xs text-gray-500">
-              Cobros en Bs., control de stock y emisión de notas de venta
+              Cobros en Bs., control de stock, egresos y emisión de notas de venta
             </p>
           </div>
         </div>
@@ -563,23 +700,36 @@ export default function Cashbox() {
         </div>
       )}
 
+      {/* SECCIÓN 1: VENTAS Y CATÁLOGO */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow border border-gray-100">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
             <div>
               <p className="text-xs font-semibold uppercase text-emerald-800">
-                Ingresos de esta sesión en Caja
+                Ingresos Sesión
               </p>
-              <p className="text-xl font-extrabold text-emerald-700">
+              <p className="text-lg font-extrabold text-emerald-700">
                 + Bs. {sessionIncome.toFixed(2)}
               </p>
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-gray-600">
-                Total Ingresos Acumulados (Ventas)
+              <p className="text-xs font-semibold uppercase text-rose-700">
+                Total Egresos / Pagos
               </p>
-              <p className="text-xl font-extrabold text-gray-900">
-                Bs. {totalIncome.toFixed(2)}
+              <p className="text-lg font-extrabold text-rose-600">
+                - Bs. {totalExpenses.toFixed(2)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase text-gray-600">
+                Saldo Neto Caja
+              </p>
+              <p
+                className={`text-lg font-extrabold ${
+                  netBalance >= 0 ? 'text-gray-900' : 'text-red-600'
+                }`}
+              >
+                Bs. {netBalance.toFixed(2)}
               </p>
             </div>
           </div>
@@ -606,9 +756,7 @@ export default function Cashbox() {
           />
 
           {filteredProducts.length === 0 ? (
-            <p className="text-sm text-gray-500 py-4">
-              No se encontraron productos.
-            </p>
+            <p className="text-sm text-gray-500 py-4">No se encontraron productos.</p>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-[500px] overflow-y-auto">
               {filteredProducts.map(product => {
@@ -756,6 +904,158 @@ export default function Cashbox() {
         </div>
       </div>
 
+      {/* SECCIÓN 2: EGRESOS Y PAGOS (SALARIOS, SERVICIOS Y OTROS) */}
+      <div className="bg-white p-6 rounded-xl shadow border border-gray-100">
+        <div className="flex flex-wrap justify-between items-center gap-2 mb-4 border-b pb-3">
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">
+              Egresos y Pagos (Salarios, Servicios y Otros)
+            </h2>
+            <p className="text-xs text-gray-500">
+              Registra salidas de dinero de caja por sueldos, servicios básicos o gastos operativos
+            </p>
+          </div>
+          <div className="bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg text-sm font-bold text-rose-700">
+            Total Egresos: Bs. {totalExpenses.toFixed(2)}
+          </div>
+        </div>
+
+        <form
+          onSubmit={handleRegisterExpense}
+          className="grid grid-cols-1 md:grid-cols-12 gap-3 mb-6 items-end"
+        >
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Categoría
+            </label>
+            <select
+              value={expenseCategory}
+              onChange={e =>
+                setExpenseCategory(e.target.value as 'Salarios' | 'Servicios' | 'Otros')
+              }
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="Salarios">Salarios</option>
+              <option value="Servicios">Servicios</option>
+              <option value="Otros">Otros</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Descripción / Beneficiario
+            </label>
+            <input
+              type="text"
+              value={expenseDescription}
+              onChange={e => setExpenseDescription(e.target.value)}
+              placeholder="Ej. Sueldo técnico, Luz, Internet, Insumos..."
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm"
+            />
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Monto (Bs.)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={expenseAmount}
+              onChange={e => setExpenseAmount(e.target.value)}
+              placeholder="0.00"
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm"
+            />
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Medio de Pago
+            </label>
+            <select
+              value={expensePaymentMethod}
+              onChange={e => setExpensePaymentMethod(e.target.value)}
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="efectivo">Efectivo</option>
+              <option value="transferencia">Transferencia</option>
+              <option value="qr">Pago QR</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-2">
+            <button
+              type="submit"
+              disabled={expenseLoading}
+              className="w-full bg-rose-600 hover:bg-rose-700 text-white py-2.5 px-4 rounded-lg text-sm font-bold transition disabled:bg-gray-300"
+            >
+              {expenseLoading ? 'Guardando...' : '+ Registrar Pago'}
+            </button>
+          </div>
+        </form>
+
+        {expenses.length === 0 ? (
+          <p className="text-sm text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
+            No hay egresos ni pagos registrados todavía.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="bg-gray-50 border-b text-xs uppercase text-gray-600">
+                  <th className="p-2.5">Fecha</th>
+                  <th className="p-2.5">Categoría</th>
+                  <th className="p-2.5">Descripción</th>
+                  <th className="p-2.5">Medio</th>
+                  <th className="p-2.5 text-right">Monto</th>
+                  <th className="p-2.5 text-center">Acción</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {expenses.map(exp => (
+                  <tr key={exp.id} className="hover:bg-gray-50">
+                    <td className="p-2.5 text-xs text-gray-500">
+                      {new Date(exp.created_at).toLocaleString()}
+                    </td>
+                    <td className="p-2.5">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${
+                          exp.category === 'Salarios'
+                            ? 'bg-indigo-100 text-indigo-800'
+                            : exp.category === 'Servicios'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-slate-100 text-slate-800'
+                        }`}
+                      >
+                        {exp.category}
+                      </span>
+                    </td>
+                    <td className="p-2.5 font-medium text-gray-900">{exp.description}</td>
+                    <td className="p-2.5 text-xs text-gray-600">
+                      {formatPaymentMethodLabel(exp.payment_method)}
+                    </td>
+                    <td className="p-2.5 text-right font-bold text-rose-600">
+                      - Bs. {Number(exp.amount).toFixed(2)}
+                    </td>
+                    <td className="p-2.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteExpense(exp.id)}
+                        className="text-xs text-red-600 hover:underline font-semibold"
+                      >
+                        Eliminar
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* MODAL DE NOTA DE VENTA */}
       {receipt && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[9999] overflow-y-auto">
           <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-gray-200 my-8">
