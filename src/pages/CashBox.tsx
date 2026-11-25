@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 
 interface Product {
@@ -46,6 +47,7 @@ interface CompanyConfig {
 }
 
 export default function CashBox() {
+  const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -175,6 +177,11 @@ export default function CashBox() {
     setCart(prev => prev.filter(item => item.id !== id));
   };
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/login');
+  };
+
   const totalAmount = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const numericAmountPaid =
     paymentMethod === 'efectivo'
@@ -206,7 +213,6 @@ export default function CashBox() {
     const targetTable = item.sourceTable || fallbackProduct?.sourceTable || 'inventory';
     const targetField = item.stockField || fallbackProduct?.stockField || 'stock';
 
-    // Intento 1: actualizar columna detectada ('stock' o 'quantity') con .select() para verificar filas afectadas
     const { data: updatedRows, error: updErr } = await supabase
       .from(targetTable)
       .update({ [targetField]: nextStock })
@@ -217,7 +223,6 @@ export default function CashBox() {
       return { ok: true };
     }
 
-    // Intento 2: si la columna alternativa existe en la tabla, probar con ella
     const altField = targetField === 'stock' ? 'quantity' : 'stock';
     const { data: altRows, error: altErr } = await supabase
       .from(targetTable)
@@ -338,7 +343,6 @@ export default function CashBox() {
         }
       }
 
-      // Descontar stock de cada ítem vendido y verificar resultado real
       const stockErrors: string[] = [];
       const nextStockById: Record<string, number> = {};
 
@@ -354,7 +358,6 @@ export default function CashBox() {
         }
       }
 
-      // Actualizar estado local del catálogo de inmediato
       setProducts(prev =>
         prev.map(p =>
           Object.prototype.hasOwnProperty.call(nextStockById, p.id)
@@ -414,6 +417,64 @@ export default function CashBox() {
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto p-4">
+      <div className="flex flex-wrap justify-between items-center bg-white p-4 rounded-xl shadow border border-gray-100 gap-4">
+        <div className="flex items-center gap-3">
+          {companyConfig.logoUrl && (
+            <img
+              src={companyConfig.logoUrl}
+              alt="Logo"
+              className="w-11 h-11 object-contain rounded"
+            />
+          )}
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">
+              Caja y Ventas — {companyConfig.companyName}
+            </h1>
+            <p className="text-xs text-gray-500">
+              Registro de ventas, control de stock y emisión de notas de venta
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="bg-gray-600 hover:bg-gray-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Inicio
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/inventory')}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Inventario
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/reports')}
+            className="bg-purple-600 hover:bg-purple-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Reportes
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/settings')}
+            className="bg-gray-800 hover:bg-gray-900 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Configuración
+          </button>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            Cerrar Sesión
+          </button>
+        </div>
+      </div>
+
       {successBanner && (
         <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 px-4 py-3 rounded-xl flex justify-between items-center font-medium">
           <span>{successBanner}</span>
@@ -428,7 +489,6 @@ export default function CashBox() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Catálogo de Productos */}
         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow border border-gray-100">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
             <div>
@@ -501,7 +561,6 @@ export default function CashBox() {
           )}
         </div>
 
-        {/* Carrito de Venta */}
         <div className="bg-white p-6 rounded-xl shadow border border-gray-100 flex flex-col justify-between">
           <div>
             <h2 className="text-xl font-bold text-gray-900 mb-4">Carrito de Venta</h2>
@@ -600,7 +659,6 @@ export default function CashBox() {
         </div>
       </div>
 
-      {/* Modal Nota de Venta Automática al Completar Venta */}
       {receipt && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[9999] overflow-y-auto">
           <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-gray-200 my-8">
