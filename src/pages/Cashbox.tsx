@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 
 interface Product {
@@ -460,7 +460,7 @@ export default function CashBox() {
 
       {/* Modal Nota de Venta Automática al Completar Venta */}
       {receipt && (
-        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[9999] overflow-y-auto">
           <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-gray-200 my-8">
             <style>{`
               @media print {

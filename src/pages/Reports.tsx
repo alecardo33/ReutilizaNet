@@ -82,7 +82,6 @@ export default function Reports() {
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([])
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([])
-  const [inventoryValue, setInventoryValue] = useState(0)
   const [initialCapital, setInitialCapital] = useState(0)
   const [currency, setCurrency] = useState('Bs.')
   const [companyName, setCompanyName] = useState('ReutilizaNet')
@@ -168,7 +167,6 @@ export default function Reports() {
       if (invRes.data) {
         setInventoryItems(invRes.data)
         const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost || 0) * Number(item.stock || 0)), 0)
-        setInventoryValue(totalInvCost)
       }
     } catch (err) {
       console.error('Error fetching reports data:', err)
@@ -462,10 +460,11 @@ export default function Reports() {
       const itemPaid = getSalePaidAmount(s)
       const itemCost = Number(s.unit_cost || 0) || 0
 
-      const existing = groupsMap.get(key)
+      const existing: any = groupsMap.get(key)
       if (!existing) {
         groupsMap.set(key, {
           ...s,
+          _itemsCount: 1,
           product_name: itemName,
           quantity: itemQty,
           unit_cost: itemCost,
@@ -487,6 +486,7 @@ export default function Reports() {
         )
         groupsMap.set(key, {
           ...existing,
+          _itemsCount: Number(existing._itemsCount || 1) + 1,
           product_name: mergedNames,
           quantity: mergedQty,
           unit_cost: weightedCost,
@@ -593,7 +593,6 @@ export default function Reports() {
 
   const kardexMovements = buildKardexMovements()
 
-  const filteredExpensesOnly = expenses.filter(exp => exp && matchesDateRange(exp.created_at))
   const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e?.amount || 0), 0)
   const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
   const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
@@ -1030,7 +1029,14 @@ export default function Reports() {
                             <td className="p-3 text-xs text-gray-500">
                               {new Date(item.created_at).toLocaleDateString()}
                             </td>
-                            <td className="p-3 font-medium text-gray-900">{resolveSaleProductName(item)}</td>
+                            <td className="p-3 font-medium text-gray-900">
+                              <div>{resolveSaleProductName(item)}</div>
+                              {Number((item as any)._itemsCount || 1) > 1 && (
+                                <span className="inline-block mt-1 text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                                  1 sola venta ({(item as any)._itemsCount} productos)
+                                </span>
+                              )}
+                            </td>
                             <td className="p-3 font-mono text-xs text-blue-700">{sn || '—'}</td>
                             <td className="p-3 text-xs">{item.customer || 'Cliente Mostrador'}</td>
                             <td className="p-3 text-center">{item.quantity}</td>
