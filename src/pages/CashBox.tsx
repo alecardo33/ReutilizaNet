@@ -5,7 +5,9 @@ interface Product {
   id: string;
   name: string;
   price: number;
+  cost: number;
   stock: number;
+  sourceTable: 'inventory' | 'products';
 }
 
 interface CartItem extends Product {
@@ -107,7 +109,9 @@ export default function CashBox() {
   };
 
   const fetchSalesIncome = async () => {
-    const { data, error } = await supabase.from('sales').select('total, total_amount, amount_paid');
+    const { data, error } = await supabase
+      .from('sales')
+      .select('total, total_amount, amount_paid');
     if (!error && Array.isArray(data)) {
       const sum = data.reduce((acc, row: any) => {
         const val = Number(row?.amount_paid ?? row?.total_amount ?? row?.total ?? 0);
@@ -125,7 +129,9 @@ export default function CashBox() {
           id: String(item.id),
           name: item.name || item.item_name || 'Producto',
           price: Number(item.price ?? item.sale_price ?? 0) || 0,
-          stock: Number(item.stock ?? item.quantity ?? 0) || 0
+          cost: Number(item.cost ?? item.unit_cost ?? 0) || 0,
+          stock: Number(item.stock ?? item.quantity ?? 0) || 0,
+          sourceTable: 'inventory'
         }))
       );
       return;
@@ -138,7 +144,9 @@ export default function CashBox() {
           id: String(item.id),
           name: item.name || 'Producto',
           price: Number(item.price ?? 0) || 0,
-          stock: Number(item.stock ?? 0) || 0
+          cost: Number(item.cost ?? item.unit_cost ?? 0) || 0,
+          stock: Number(item.stock ?? 0) || 0,
+          sourceTable: 'products'
         }))
       );
     }
@@ -205,13 +213,24 @@ export default function CashBox() {
         name: item.name,
         quantity: item.quantity,
         price: Number(item.price) || 0,
-        subtotal: (Number(item.price) || 0) * item.quantity
+        cost: Number(item.cost) || 0,
+        subtotal: (Number(item.price) || 0) * item.quantity,
+        sourceTable: item.sourceTable
       }));
       const snapshotClient = clientName.trim() || 'Cliente General';
       const snapshotPayment = paymentMethod;
-      const snapshotTotal = totalAmount;
-      const snapshotPaid = numericAmountPaid;
-      const snapshotChange = changeAmount;
+      const snapshotTotal = Number(totalAmount.toFixed(2));
+      const snapshotPaid = Number(numericAmountPaid.toFixed(2));
+      const snapshotChange = Number(changeAmount.toFixed(2));
+      const totalUnits = snapshotItems.reduce((acc, i) => acc + i.quantity, 0);
+      const weightedUnitCost =
+        totalUnits > 0
+          ? Number(
+              (
+                snapshotItems.reduce((acc, i) => acc + i.cost * i.quantity, 0) / totalUnits
+              ).toFixed(2)
+            )
+          : 0;
       const nowIso = new Date().toISOString();
       const saleGroupId = `sale-${Date.now()}`;
 
@@ -224,7 +243,8 @@ export default function CashBox() {
 
       const fullPayload: any = {
         product_name: productSummary,
-        quantity: snapshotItems.reduce((acc, i) => acc + i.quantity, 0),
+        quantity: totalUnits,
+        unit_cost: weightedUnitCost,
         total: snapshotTotal,
         total_amount: snapshotTotal,
         amount_paid: snapshotPaid,
@@ -236,38 +256,78 @@ export default function CashBox() {
         created_at: nowIso
       };
 
-      const res1 = await supabase.from('sales').insert([fullPayload]).select().maybeSingle();
+      const res1 = await supabase
+        .from('sales')
+        .insert([fullPayload])
+        .select()
+        .maybeSingle();
+
       if (!res1.error) {
         saleData = res1.data;
       } else {
         const fallbackPayload: any = {
           product_name: productSummary,
-          quantity: snapshotItems.reduce((acc, i) => acc + i.quantity, 0),
+          quantity: totalUnits,
+          unit_cost: weightedUnitCost,
           total_amount: snapshotTotal,
+          amount_paid: snapshotPaid,
+          change_amount: snapshotChange,
           payment_method: snapshotPayment,
+          client_name: snapshotClient,
           customer: snapshotClient,
+          sale_group_id: saleGroupId,
           created_at: nowIso
         };
-        const res2 = await supabase.from('sales').insert([fallbackPayload]).select().maybeSingle();
+        const res2 = await supabase
+          .from('sales')
+          .insert([fallbackPayload])
+          .select()
+          .maybeSingle();
         if (!res2.error) {
           saleData = res2.data;
         } else {
-          dbWarning = res2.error.message || res1.error.message || 'Error al guardar venta en Supabase';
+          dbWarning =
+            res2.error.message ||
+            res1.error.message ||
+            'Error al guardar venta en Supabase';
+        }
+      }
+
+      // Descontar stock de cada ítem vendido en inventory o products
+      for (const item of snapshotItems) {
+        const currentProduct = products.find(p => p.id === item.id);
+        const currentStock = Number(currentProduct?.stock ?? 0);
+        const nextStock = Math.max(0, currentStock - Number(item.quantity || 0));
+        const targetTable = item.sourceTable || currentProduct?.sourceTable || 'inventory';
+
+        const { error: stockErr } = await supabase
+          .from(targetTable)
+          .update({ stock: nextStock })
+          .eq('id', item.id);
+
+        if (stockErr && !dbWarning) {
+          dbWarning = `Venta registrada, pero no se pudo actualizar stock de "${item.name}": ${stockErr.message}`;
         }
       }
 
       const generatedReceipt: SaleReceipt = {
-        id: saleData?.id ? String(saleData.id) : String(Date.now()),
+        id: saleData?.id ? String(saleData.id) : saleGroupId,
         createdAt: saleData?.created_at || nowIso,
         clientName: snapshotClient,
         paymentMethod: snapshotPayment,
-        items: snapshotItems,
+        items: snapshotItems.map(({ id, name, quantity, price, subtotal }) => ({
+          id,
+          name,
+          quantity,
+          price,
+          subtotal
+        })),
         total: snapshotTotal,
         amountPaid: snapshotPaid,
         changeAmount: snapshotChange
       };
 
-      const incomeAdded = paymentMethod === 'efectivo' ? snapshotTotal : snapshotPaid;
+      const incomeAdded = snapshotPayment === 'efectivo' ? snapshotTotal : snapshotPaid;
       setSessionIncome(prev => Number((prev + incomeAdded).toFixed(2)));
       setTotalIncome(prev => Number((prev + incomeAdded).toFixed(2)));
 
@@ -278,11 +338,10 @@ export default function CashBox() {
       setCart([]);
       setAmountPaid('');
       setClientName('');
-      fetchProducts();
-      fetchSalesIncome();
+      await Promise.all([fetchProducts(), fetchSalesIncome()]);
 
       if (dbWarning) {
-        alert(`Nota de Venta abierta, pero Supabase reportó: ${dbWarning}`);
+        alert(`Nota de Venta abierta, pero hubo un aviso: ${dbWarning}`);
       }
     } catch (err: any) {
       console.error('Error al procesar la venta:', err);
@@ -316,12 +375,20 @@ export default function CashBox() {
         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow border border-gray-100">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
             <div>
-              <p className="text-xs font-semibold uppercase text-emerald-800">Ingresos de esta sesión en Caja</p>
-              <p className="text-xl font-extrabold text-emerald-700">+ Bs. {sessionIncome.toFixed(2)}</p>
+              <p className="text-xs font-semibold uppercase text-emerald-800">
+                Ingresos de esta sesión en Caja
+              </p>
+              <p className="text-xl font-extrabold text-emerald-700">
+                + Bs. {sessionIncome.toFixed(2)}
+              </p>
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-gray-600">Total Ingresos Acumulados (Ventas)</p>
-              <p className="text-xl font-extrabold text-gray-900">Bs. {totalIncome.toFixed(2)}</p>
+              <p className="text-xs font-semibold uppercase text-gray-600">
+                Total Ingresos Acumulados (Ventas)
+              </p>
+              <p className="text-xl font-extrabold text-gray-900">
+                Bs. {totalIncome.toFixed(2)}
+              </p>
             </div>
           </div>
 
@@ -347,14 +414,21 @@ export default function CashBox() {
           />
 
           {filteredProducts.length === 0 ? (
-            <p className="text-sm text-gray-500 py-4">No hay productos con stock disponible.</p>
+            <p className="text-sm text-gray-500 py-4">
+              No hay productos con stock disponible.
+            </p>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-[500px] overflow-y-auto">
               {filteredProducts.map(product => (
-                <div key={product.id} className="border border-gray-200 p-4 rounded-lg flex flex-col justify-between">
+                <div
+                  key={product.id}
+                  className="border border-gray-200 p-4 rounded-lg flex flex-col justify-between"
+                >
                   <div>
                     <h3 className="font-semibold text-gray-900">{product.name}</h3>
-                    <p className="text-green-600 font-bold mt-1">Bs. {product.price.toFixed(2)}</p>
+                    <p className="text-green-600 font-bold mt-1">
+                      Bs. {product.price.toFixed(2)}
+                    </p>
                     <p className="text-xs text-gray-500 mt-0.5">Stock: {product.stock}</p>
                   </div>
                   <button
@@ -376,10 +450,15 @@ export default function CashBox() {
             <h2 className="text-xl font-bold text-gray-900 mb-4">Carrito de Venta</h2>
             <div className="space-y-3 max-h-[250px] overflow-y-auto mb-4">
               {cart.length === 0 ? (
-                <p className="text-gray-500 text-center py-8 text-sm">El carrito está vacío</p>
+                <p className="text-gray-500 text-center py-8 text-sm">
+                  El carrito está vacío
+                </p>
               ) : (
                 cart.map(item => (
-                  <div key={item.id} className="flex justify-between items-center border-b pb-2">
+                  <div
+                    key={item.id}
+                    className="flex justify-between items-center border-b pb-2"
+                  >
                     <div>
                       <p className="font-medium text-gray-900 text-sm">{item.name}</p>
                       <p className="text-xs text-gray-500">
@@ -401,7 +480,9 @@ export default function CashBox() {
 
           <div className="border-t pt-4 space-y-3">
             <div>
-              <label className="text-sm font-semibold text-gray-800">Nombre del Cliente (Opcional)</label>
+              <label className="text-sm font-semibold text-gray-800">
+                Nombre del Cliente (Opcional)
+              </label>
               <input
                 type="text"
                 value={clientName}
@@ -426,7 +507,9 @@ export default function CashBox() {
 
             {paymentMethod === 'efectivo' && (
               <div>
-                <label className="text-sm font-semibold text-gray-800">Monto Recibido (Bs.)</label>
+                <label className="text-sm font-semibold text-gray-800">
+                  Monto Recibido (Bs.)
+                </label>
                 <input
                   type="number"
                   value={amountPaid}
@@ -436,7 +519,9 @@ export default function CashBox() {
                 />
                 <p className="text-xs text-gray-700 mt-1.5">
                   Cambio / Vuelto:{' '}
-                  <span className="font-bold text-indigo-700">Bs. {changeAmount.toFixed(2)}</span>
+                  <span className="font-bold text-indigo-700">
+                    Bs. {changeAmount.toFixed(2)}
+                  </span>
                 </p>
               </div>
             )}
@@ -475,13 +560,25 @@ export default function CashBox() {
               <div className="flex justify-between items-start border-b-2 border-gray-800 pb-3">
                 <div className="flex items-center gap-2.5">
                   {companyConfig.logoUrl && (
-                    <img src={companyConfig.logoUrl} alt="Logo" className="w-11 h-11 object-contain" />
+                    <img
+                      src={companyConfig.logoUrl}
+                      alt="Logo"
+                      className="w-11 h-11 object-contain"
+                    />
                   )}
                   <div>
-                    <h2 className="text-lg font-extrabold uppercase">{companyConfig.companyName}</h2>
-                    {companyConfig.nit && <p className="text-[11px] text-gray-600">NIT: {companyConfig.nit}</p>}
-                    {companyConfig.address && <p className="text-[11px] text-gray-600">{companyConfig.address}</p>}
-                    {companyConfig.phone && <p className="text-[11px] text-gray-600">Tel: {companyConfig.phone}</p>}
+                    <h2 className="text-lg font-extrabold uppercase">
+                      {companyConfig.companyName}
+                    </h2>
+                    {companyConfig.nit && (
+                      <p className="text-[11px] text-gray-600">NIT: {companyConfig.nit}</p>
+                    )}
+                    {companyConfig.address && (
+                      <p className="text-[11px] text-gray-600">{companyConfig.address}</p>
+                    )}
+                    {companyConfig.phone && (
+                      <p className="text-[11px] text-gray-600">Tel: {companyConfig.phone}</p>
+                    )}
                   </div>
                 </div>
                 <div className="text-right">
@@ -521,52 +618,85 @@ export default function CashBox() {
                 <tbody className="divide-y divide-gray-300">
                   {receipt.items.map((item, idx) => (
                     <tr key={`${item.id}-${idx}`}>
-                      <td className="p-2 border-r border-gray-300 text-center font-bold">{item.quantity}</td>
+                      <td className="p-2 border-r border-gray-300 text-center font-bold">
+                        {item.quantity}
+                      </td>
                       <td className="p-2 border-r border-gray-300">{item.name}</td>
-                      <td className="p-2 border-r border-gray-300 text-right">Bs. {item.price.toFixed(2)}</td>
-                      <td className="p-2 text-right font-semibold">Bs. {item.subtotal.toFixed(2)}</td>
+                      <td className="p-2 border-r border-gray-300 text-right">
+                        Bs. {item.price.toFixed(2)}
+                      </td>
+                      <td className="p-2 text-right font-semibold">
+                        Bs. {item.subtotal.toFixed(2)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-gray-50 font-bold">
-                    <td colSpan={3} className="p-2 border-r border-gray-300 text-right">Pagado:</td>
-                    <td className="p-2 text-right text-emerald-700">Bs. {receipt.amountPaid.toFixed(2)}</td>
+                    <td colSpan={3} className="p-2 border-r border-gray-300 text-right">
+                      Pagado:
+                    </td>
+                    <td className="p-2 text-right text-emerald-700">
+                      Bs. {receipt.amountPaid.toFixed(2)}
+                    </td>
                   </tr>
                   {receipt.changeAmount > 0 && (
                     <tr className="bg-gray-50 font-bold">
-                      <td colSpan={3} className="p-2 border-r border-gray-300 text-right">Cambio / Vuelto:</td>
-                      <td className="p-2 text-right text-indigo-700">Bs. {receipt.changeAmount.toFixed(2)}</td>
+                      <td colSpan={3} className="p-2 border-r border-gray-300 text-right">
+                        Cambio / Vuelto:
+                      </td>
+                      <td className="p-2 text-right text-indigo-700">
+                        Bs. {receipt.changeAmount.toFixed(2)}
+                      </td>
                     </tr>
                   )}
                   <tr className="bg-gray-100 border-t-2 border-gray-800 font-extrabold text-sm">
-                    <td colSpan={3} className="p-2 border-r border-gray-300 text-right uppercase">Total:</td>
+                    <td
+                      colSpan={3}
+                      className="p-2 border-r border-gray-300 text-right uppercase"
+                    >
+                      Total:
+                    </td>
                     <td className="p-2 text-right">Bs. {receipt.total.toFixed(2)}</td>
                   </tr>
                 </tfoot>
               </table>
 
-              {(isQrOrTransfer(receipt.paymentMethod) || companyConfig.bankName || companyConfig.accountNumber || companyConfig.qrUrl) && (
+              {(isQrOrTransfer(receipt.paymentMethod) ||
+                companyConfig.bankName ||
+                companyConfig.accountNumber ||
+                companyConfig.qrUrl) && (
                 <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-3 text-xs space-y-2">
                   <p className="font-bold text-blue-950 uppercase">
                     Datos de Pago ({formatPaymentMethodLabel(receipt.paymentMethod)})
                   </p>
 
-                  {(companyConfig.bankName || companyConfig.accountNumber || companyConfig.accountHolder) && (
+                  {(companyConfig.bankName ||
+                    companyConfig.accountNumber ||
+                    companyConfig.accountHolder) && (
                     <div className="text-gray-800 space-y-0.5">
                       {companyConfig.bankName && (
-                        <p><span className="font-semibold">Banco:</span> {companyConfig.bankName}</p>
+                        <p>
+                          <span className="font-semibold">Banco:</span>{' '}
+                          {companyConfig.bankName}
+                        </p>
                       )}
                       {companyConfig.accountNumber && (
-                        <p><span className="font-semibold">N° Cuenta:</span> <span className="font-mono">{companyConfig.accountNumber}</span></p>
+                        <p>
+                          <span className="font-semibold">N° Cuenta:</span>{' '}
+                          <span className="font-mono">{companyConfig.accountNumber}</span>
+                        </p>
                       )}
                       {companyConfig.accountHolder && (
-                        <p><span className="font-semibold">Titular:</span> {companyConfig.accountHolder}</p>
+                        <p>
+                          <span className="font-semibold">Titular:</span>{' '}
+                          {companyConfig.accountHolder}
+                        </p>
                       )}
                     </div>
                   )}
 
-                  {receipt.paymentMethod === 'qr' && (
+                  {String(receipt.paymentMethod || '').toLowerCase() === 'qr' && (
                     <div className="flex flex-col items-center justify-center pt-1">
                       {companyConfig.qrUrl ? (
                         <img
@@ -576,7 +706,8 @@ export default function CashBox() {
                         />
                       ) : (
                         <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2.5 py-1">
-                          Configura tu imagen QR o datos bancarios en el módulo <strong>Configuración</strong>.
+                          Configura tu imagen QR o datos bancarios en el módulo{' '}
+                          <strong>Configuración</strong>.
                         </p>
                       )}
                     </div>

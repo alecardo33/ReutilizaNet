@@ -16,9 +16,11 @@ interface InventoryItem {
 interface SaleRecord {
   id: string
   inventory_id?: string | null
+  sale_group_id?: string | null
   product_name?: string
   serial_number?: string
   customer?: string
+  client_name?: string
   quantity: number
   unit_cost: number
   total_amount: number
@@ -86,6 +88,7 @@ export default function Reports() {
   const [currency, setCurrency] = useState('Bs.')
   const [companyName, setCompanyName] = useState('ReutilizaNet')
   const [logoUrl, setLogoUrl] = useState('')
+  const [qrUrl, setQrUrl] = useState('')
   const [loading, setLoading] = useState(true)
   const [userRole, setUserRole] = useState<string>('')
   const [saleActionLoadingId, setSaleActionLoadingId] = useState<string | null>(null)
@@ -140,7 +143,7 @@ export default function Reports() {
       const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('inventory').select('*').order('name', { ascending: true }),
-        supabase.from('company_settings').select('currency, company_name, logo_url, initial_capital, nit, address, phone, warranty_notes, bank_name, account_number, account_holder').eq('id', 1).maybeSingle(),
+        supabase.from('company_settings').select('*').eq('id', 1).maybeSingle(),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
         supabase.from('expenses').select('*').order('created_at', { ascending: false })
       ])
@@ -149,24 +152,32 @@ export default function Reports() {
       if (purchasesRes.data) setPurchases(purchasesRes.data)
       if (expensesRes.data) setExpenses(expensesRes.data)
       if (settingsRes.data) {
-        if (settingsRes.data.currency) setCurrency(settingsRes.data.currency)
-        if (settingsRes.data.company_name) setCompanyName(settingsRes.data.company_name)
-        if (settingsRes.data.logo_url) setLogoUrl(settingsRes.data.logo_url)
-        setInitialCapital(Number(settingsRes.data.initial_capital) || 0)
+        const row: any = settingsRes.data
+        if (row.currency) setCurrency(row.currency)
+        if (row.company_name) setCompanyName(row.company_name)
+        if (row.logo_url) setLogoUrl(row.logo_url)
+        const qrCandidate =
+          row.qr_url ||
+          row.qr_image_url ||
+          row.qr_code_url ||
+          row.qr_image ||
+          row.payment_qr_url ||
+          ''
+        setQrUrl(String(qrCandidate || ''))
+        setInitialCapital(Number(row.initial_capital) || 0)
         setCompanyDetails({
-          nit: settingsRes.data.nit || '',
-          address: settingsRes.data.address || 'La Paz - Bolivia',
-          phone: settingsRes.data.phone || '',
-          warranty_notes: settingsRes.data.warranty_notes || '30 días de garantía por defectos de hardware (no cubre daños físicos, líquidos ni sobrecargas).',
-          bank_name: settingsRes.data.bank_name || '',
-          account_number: settingsRes.data.account_number || '',
-          account_holder: settingsRes.data.account_holder || ''
+          nit: row.nit || '',
+          address: row.address || 'La Paz - Bolivia',
+          phone: row.phone || '',
+          warranty_notes: row.warranty_notes || '30 días de garantía por defectos de hardware (no cubre daños físicos, líquidos ni sobrecargas).',
+          bank_name: row.bank_name || '',
+          account_number: row.account_number || '',
+          account_holder: row.account_holder || ''
         })
       }
 
       if (invRes.data) {
         setInventoryItems(invRes.data)
-        const totalInvCost = invRes.data.reduce((acc, item) => acc + (Number(item.cost || 0) * Number(item.stock || 0)), 0)
       }
     } catch (err) {
       console.error('Error fetching reports data:', err)
@@ -375,7 +386,7 @@ export default function Reports() {
 
   const matchesItemName = (rawName?: string) => {
     if (!selectedItemFilter) return true
-    return cleanProductName(rawName).toLowerCase() === selectedItemFilter.toLowerCase()
+    return cleanProductName(rawName).toLowerCase().includes(selectedItemFilter.toLowerCase())
   }
 
   const buildCapitalStatement = (): {
@@ -445,12 +456,15 @@ export default function Reports() {
     const groupsMap = new Map<string, SaleRecord>()
 
     rawSales.forEach((s: any, idx: number) => {
-      const explicitGroup = s.sale_group_id || s.group_id || s.receipt_id || ''
+      const explicitGroup = String(s.sale_group_id || s.group_id || s.receipt_id || '').trim()
       const dt = s.created_at ? new Date(s.created_at) : null
       const dayKey = dt && !isNaN(dt.getTime())
         ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
         : String(idx)
-      const customerKey = String(s.customer || s.client_name || 'cliente mostrador').trim().toLowerCase()
+      const customerRaw = String(s.customer || s.client_name || '').trim().toLowerCase()
+      const customerKey = customerRaw && customerRaw !== 'cliente general' && customerRaw !== 'cliente mostrador'
+        ? customerRaw
+        : `row_${s.id || idx}`
       const fallbackKey = `${dayKey}__${customerKey}`
       const key = explicitGroup ? `grp_${explicitGroup}` : fallbackKey
 
@@ -464,6 +478,7 @@ export default function Reports() {
       if (!existing) {
         groupsMap.set(key, {
           ...s,
+          customer: s.customer || s.client_name || 'Cliente Mostrador',
           _itemsCount: 1,
           product_name: itemName,
           quantity: itemQty,
@@ -565,7 +580,7 @@ export default function Reports() {
         date: s.created_at || new Date().toISOString(),
         type: 'SALIDA (Venta)',
         item_name: cleanName,
-        reference: `Cliente: ${s.customer || 'Mostrador'}`,
+        reference: `Cliente: ${s.customer || s.client_name || 'Mostrador'}`,
         serial_number: extractSerial(s),
         in_qty: 0,
         out_qty: Number(s.quantity || 0),
@@ -853,7 +868,6 @@ export default function Reports() {
           {loading ? (
             <p className="text-sm text-gray-500">Cargando información de reportes...</p>
           ) : reportTab === 'capital_expenses' ? (
-            /* ESTADO DE CUENTA DE CAPITAL INICIAL Y TODOS LOS GASTOS DETALLADOS */
             <div>
               <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
                 <div>
@@ -885,7 +899,6 @@ export default function Reports() {
                     </tr>
                   </thead>
                   <tbody className="divide-y text-sm text-gray-800">
-                    {/* Fila Inicial: Capital Inicial */}
                     <tr className="bg-emerald-50 font-bold">
                       <td className="p-3 text-xs text-gray-600">INICIO</td>
                       <td className="p-3">
@@ -1038,7 +1051,7 @@ export default function Reports() {
                               )}
                             </td>
                             <td className="p-3 font-mono text-xs text-blue-700">{sn || '—'}</td>
-                            <td className="p-3 text-xs">{item.customer || 'Cliente Mostrador'}</td>
+                            <td className="p-3 text-xs">{item.customer || item.client_name || 'Cliente Mostrador'}</td>
                             <td className="p-3 text-center">{item.quantity}</td>
                             <td className="p-3 font-semibold">{currency} {total.toFixed(2)}</td>
                             <td className="p-3 text-emerald-700 font-semibold">{currency} {paid.toFixed(2)}</td>
@@ -1180,7 +1193,7 @@ export default function Reports() {
                           .filter(p => p?.item_name?.toLowerCase() === item?.name?.toLowerCase())
                           .reduce((sum, p) => sum + Number(p.quantity || 0), 0)
                         const periodOut = filteredSales
-                          .filter(s => cleanProductName(s?.product_name).toLowerCase() === item?.name?.toLowerCase())
+                          .filter(s => cleanProductName(s?.product_name).toLowerCase().includes(item?.name?.toLowerCase()))
                           .reduce((sum, s) => sum + Number(s.quantity || 0), 0)
                         const valTotal = Number(item.cost || 0) * Number(item.stock || 0)
 
@@ -1285,6 +1298,7 @@ export default function Reports() {
           )}
         </div>
       </div>
+
       {/* Modal Imprimible: Reimpresión de Nota de Venta */}
       {reprintSale && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 overflow-y-auto">
@@ -1326,7 +1340,7 @@ export default function Reports() {
 
               <div className="grid grid-cols-2 gap-3 bg-gray-50 p-3 rounded border border-gray-200 text-xs">
                 <div>
-                  <p><span className="font-bold">Cliente:</span> {reprintSale.customer || 'Cliente Mostrador'}</p>
+                  <p><span className="font-bold">Cliente:</span> {reprintSale.customer || reprintSale.client_name || 'Cliente Mostrador'}</p>
                   <p className="mt-1">
                     <span className="font-bold">N° Serie:</span>{' '}
                     <span className="font-mono">{extractSerial(reprintSale) || '—'}</span>
@@ -1400,14 +1414,25 @@ export default function Reports() {
                 </tfoot>
               </table>
 
-              {(companyDetails.bank_name || companyDetails.account_number) && (
-                <div className="bg-blue-50/60 border border-blue-200 rounded p-2.5 text-[11px] text-gray-700">
-                  <p className="font-bold text-blue-900 uppercase mb-0.5">Datos para Transferencia / Pago:</p>
-                  <p>
-                    {companyDetails.bank_name && <span>Banco: <strong>{companyDetails.bank_name}</strong> · </span>}
-                    {companyDetails.account_number && <span>Cuenta: <strong>{companyDetails.account_number}</strong> · </span>}
-                    {companyDetails.account_holder && <span>Titular: <strong>{companyDetails.account_holder}</strong></span>}
-                  </p>
+              {(companyDetails.bank_name || companyDetails.account_number || qrUrl) && (
+                <div className="bg-blue-50/60 border border-blue-200 rounded p-3 text-xs text-gray-700 space-y-2">
+                  <p className="font-bold text-blue-900 uppercase">Datos para Transferencia / Pago QR:</p>
+                  {(companyDetails.bank_name || companyDetails.account_number || companyDetails.account_holder) && (
+                    <p>
+                      {companyDetails.bank_name && <span>Banco: <strong>{companyDetails.bank_name}</strong> · </span>}
+                      {companyDetails.account_number && <span>Cuenta: <strong>{companyDetails.account_number}</strong> · </span>}
+                      {companyDetails.account_holder && <span>Titular: <strong>{companyDetails.account_holder}</strong></span>}
+                    </p>
+                  )}
+                  {qrUrl && (
+                    <div className="flex flex-col items-center justify-center pt-1">
+                      <img
+                        src={qrUrl}
+                        alt="Código QR de Pago"
+                        className="w-36 h-36 object-contain bg-white p-1.5 border rounded"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
