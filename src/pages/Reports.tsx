@@ -446,12 +446,12 @@ export default function Reports() {
 
     rawSales.forEach((s: any, idx: number) => {
       const explicitGroup = s.sale_group_id || s.group_id || s.receipt_id || ''
-      const dayKey = s.created_at
-        ? String(new Date(s.created_at).toISOString().split('T')[0])
+      const dt = s.created_at ? new Date(s.created_at) : null
+      const dayKey = dt && !isNaN(dt.getTime())
+        ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
         : String(idx)
       const customerKey = String(s.customer || s.client_name || 'cliente mostrador').trim().toLowerCase()
-      const payKey = String(s.payment_method || '').trim().toLowerCase()
-      const fallbackKey = `${dayKey}__${customerKey}__${payKey}`
+      const fallbackKey = `${dayKey}__${customerKey}`
       const key = explicitGroup ? `grp_${explicitGroup}` : fallbackKey
 
       const itemName = resolveSaleProductName(s)
