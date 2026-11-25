@@ -53,10 +53,20 @@ interface ExpenseRecord {
   created_at: string
 }
 
+interface OtherIncomeRecord {
+  id: string
+  description?: string
+  category?: string
+  amount: number
+  payment_method?: string
+  created_at: string
+}
+
 interface CapitalOutflowRow {
   id: string
   date: string
-  origin: 'Compra Inventario' | 'Gasto Operativo'
+  direction: 'IN' | 'OUT'
+  origin: 'Ingreso Vario' | 'Compra Inventario' | 'Gasto Operativo'
   category: string
   description: string
   detail: string
@@ -78,11 +88,14 @@ interface KardexMovement {
   running_balance?: number
 }
 
+const LOCAL_OTHER_INCOMES_KEY = 'reutilizanet_cashbox_other_incomes'
+
 export default function Reports() {
   const navigate = useNavigate()
   const [sales, setSales] = useState<SaleRecord[]>([])
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([])
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([])
+  const [otherIncomes, setOtherIncomes] = useState<OtherIncomeRecord[]>([])
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([])
   const [initialCapital, setInitialCapital] = useState(0)
   const [currency, setCurrency] = useState('Bs.')
@@ -126,6 +139,17 @@ export default function Reports() {
     fetchFinancialData()
   }, [])
 
+  const loadLocalOtherIncomes = (): OtherIncomeRecord[] => {
+    try {
+      const raw = localStorage.getItem(LOCAL_OTHER_INCOMES_KEY)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
   const fetchFinancialData = async () => {
     setLoading(true)
     try {
@@ -140,17 +164,38 @@ export default function Reports() {
           setUserRole(String(profile.role).trim().toLowerCase())
         }
       }
-      const [salesRes, invRes, settingsRes, purchasesRes, expensesRes] = await Promise.all([
+      const [salesRes, invRes, settingsRes, purchasesRes, expensesRes, otherIncRes] = await Promise.all([
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('inventory').select('*').order('name', { ascending: true }),
         supabase.from('company_settings').select('*').eq('id', 1).maybeSingle(),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
-        supabase.from('expenses').select('*').order('created_at', { ascending: false })
+        supabase.from('expenses').select('*').order('created_at', { ascending: false }),
+        supabase.from('other_incomes').select('*').order('created_at', { ascending: false })
       ])
 
       if (salesRes.data) setSales(salesRes.data)
       if (purchasesRes.data) setPurchases(purchasesRes.data)
       if (expensesRes.data) setExpenses(expensesRes.data)
+
+      if (!otherIncRes.error && Array.isArray(otherIncRes.data)) {
+        const mappedInc: OtherIncomeRecord[] = otherIncRes.data.map((row: any) => ({
+          id: String(row.id),
+          category: row.category || row.type || 'Intereses Bancarios',
+          description: row.description || row.concept || row.detail || 'Ingreso vario',
+          amount: Number(row.amount ?? row.total ?? 0) || 0,
+          payment_method: row.payment_method || 'transferencia',
+          created_at: row.created_at || new Date().toISOString()
+        }))
+        setOtherIncomes(mappedInc)
+        try {
+          localStorage.setItem(LOCAL_OTHER_INCOMES_KEY, JSON.stringify(mappedInc))
+        } catch {
+          // Ignorar error de almacenamiento
+        }
+      } else {
+        setOtherIncomes(loadLocalOtherIncomes())
+      }
+
       if (settingsRes.data) {
         const row: any = settingsRes.data
         if (row.currency) setCurrency(row.currency)
@@ -392,17 +437,36 @@ export default function Reports() {
   const buildCapitalStatement = (): {
     rows: CapitalOutflowRow[]
     totalOutflows: number
+    totalOtherIncomesFiltered: number
     finalBalance: number
   } => {
-    const rawOutflows: Omit<CapitalOutflowRow, 'running_balance'>[] = []
+    const rawMovements: Omit<CapitalOutflowRow, 'running_balance'>[] = []
+
+    otherIncomes.forEach(inc => {
+      if (!inc) return
+      const amt = Number(inc.amount) || 0
+      if (amt > 0) {
+        rawMovements.push({
+          id: `inc-${inc.id}`,
+          date: inc.created_at || new Date().toISOString(),
+          direction: 'IN',
+          origin: 'Ingreso Vario',
+          category: inc.category || 'Intereses Bancarios',
+          description: inc.description || 'Ingreso vario',
+          detail: inc.payment_method ? `Medio: ${inc.payment_method}` : '',
+          amount: amt
+        })
+      }
+    })
 
     purchases.forEach(p => {
       if (!p) return
       const paid = getPurchasePaidAmount(p)
       if (paid > 0) {
-        rawOutflows.push({
+        rawMovements.push({
           id: `pur-${p.id}`,
           date: p.created_at || new Date().toISOString(),
+          direction: 'OUT',
           origin: 'Compra Inventario',
           category: p.category || 'Compras',
           description: `${p.quantity || 1}x ${p.item_name || 'Ítem'}`,
@@ -416,9 +480,10 @@ export default function Reports() {
       if (!exp) return
       const amt = Number(exp.amount) || 0
       if (amt > 0) {
-        rawOutflows.push({
+        rawMovements.push({
           id: `exp-${exp.id}`,
           date: exp.created_at || new Date().toISOString(),
+          direction: 'OUT',
           origin: 'Gasto Operativo',
           category: exp.category || 'Gasto General',
           description: exp.description || 'Gasto sin descripción',
@@ -428,11 +493,14 @@ export default function Reports() {
       }
     })
 
-    rawOutflows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    rawMovements.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 
     let currentCapital = initialCapital
-    const withRunningBalance: CapitalOutflowRow[] = rawOutflows.map(item => {
-      currentCapital = Number((currentCapital - item.amount).toFixed(2))
+    const withRunningBalance: CapitalOutflowRow[] = rawMovements.map(item => {
+      currentCapital =
+        item.direction === 'IN'
+          ? Number((currentCapital + item.amount).toFixed(2))
+          : Number((currentCapital - item.amount).toFixed(2))
       return {
         ...item,
         running_balance: currentCapital
@@ -440,11 +508,17 @@ export default function Reports() {
     })
 
     const filteredRows = withRunningBalance.filter(row => matchesDateRange(row.date))
-    const totalOutflows = filteredRows.reduce((sum, r) => sum + r.amount, 0)
+    const totalOutflows = filteredRows
+      .filter(r => r.direction === 'OUT')
+      .reduce((sum, r) => sum + r.amount, 0)
+    const totalOtherIncomesFiltered = filteredRows
+      .filter(r => r.direction === 'IN')
+      .reduce((sum, r) => sum + r.amount, 0)
 
     return {
       rows: filteredRows,
       totalOutflows,
+      totalOtherIncomesFiltered,
       finalBalance: currentCapital
     }
   }
@@ -611,8 +685,10 @@ export default function Reports() {
   const totalExpensesAll = expenses.reduce((acc, e) => acc + Number(e?.amount || 0), 0)
   const totalPurchasesPaidAll = purchases.reduce((acc, p) => acc + getPurchasePaidAmount(p), 0)
   const totalPurchasesPayableAll = purchases.reduce((acc, p) => acc + getPurchasePendingDebt(p), 0)
+  const totalOtherIncomesAll = otherIncomes.reduce((acc, i) => acc + Number(i?.amount || 0), 0)
 
-  const remainingCapitalAfterOutflows = initialCapital - totalPurchasesPaidAll - totalExpensesAll
+  const remainingCapitalAfterOutflows =
+    initialCapital + totalOtherIncomesAll - totalPurchasesPaidAll - totalExpensesAll
   const totalCashOnHand =
     remainingCapitalAfterOutflows +
     sales.reduce((acc, s) => acc + getSalePaidAmount(s), 0)
@@ -665,7 +741,7 @@ export default function Reports() {
                 Panel Gerencial, Kardex y Reportes — {companyName}
               </h1>
               <p className="text-sm text-gray-500">
-                Rendición de capital inicial, detalle de gastos y compras, ventas, stock y Kardex
+                Rendición de capital inicial, ingresos varios, gastos y compras, ventas, stock y Kardex
               </p>
             </div>
           </div>
@@ -712,7 +788,7 @@ export default function Reports() {
             <p className={`text-xl font-bold mt-1 ${remainingCapitalAfterOutflows >= 0 ? 'text-amber-700' : 'text-red-600'}`}>
               {currency} {remainingCapitalAfterOutflows.toFixed(2)}
             </p>
-            <p className="text-[11px] text-gray-400 mt-1">Capital inicial menos egresos</p>
+            <p className="text-[11px] text-gray-400 mt-1">Capital + ingresos varios - egresos</p>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow border-l-4 border-orange-500">
@@ -872,10 +948,10 @@ export default function Reports() {
               <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
                 <div>
                   <h2 className="text-lg font-bold text-gray-900">
-                    Estado de Cuenta: Capital Inicial, Gastos Detallados y Saldo
+                    Estado de Cuenta: Capital Inicial, Ingresos Varios, Gastos Detallados y Saldo
                   </h2>
                   <p className="text-xs text-gray-500">
-                    Detalle cronológico de todas las salidas de dinero (compras de mercadería pagadas + salarios, pasajes y gastos de caja)
+                    Detalle cronológico de ingresos varios (intereses bancarios, etc.) y salidas de dinero (compras pagadas + salarios, alquileres y gastos de caja)
                   </p>
                 </div>
                 <button
@@ -893,8 +969,8 @@ export default function Reports() {
                       <th className="p-3">Fecha</th>
                       <th className="p-3">Tipo</th>
                       <th className="p-3">Categoría</th>
-                      <th className="p-3">Detalle del Gasto / Compra</th>
-                      <th className="p-3 text-right">Monto Gastado</th>
+                      <th className="p-3">Detalle del Movimiento</th>
+                      <th className="p-3 text-right">Monto</th>
                       <th className="p-3 text-right bg-gray-200/70">Saldo Capital</th>
                     </tr>
                   </thead>
@@ -917,11 +993,12 @@ export default function Reports() {
                     {capitalStatement.rows.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="p-4 text-center text-sm text-gray-500">
-                          No hay gastos ni compras pagadas registradas en este período.
+                          No hay movimientos registrados en este período.
                         </td>
                       </tr>
                     ) : (
                       capitalStatement.rows.map(row => {
+                        const isIncome = row.direction === 'IN'
                         const isOpExpense = row.origin === 'Gasto Operativo'
                         return (
                           <tr key={row.id} className="hover:bg-gray-50">
@@ -931,7 +1008,9 @@ export default function Reports() {
                             <td className="p-3 whitespace-nowrap">
                               <span
                                 className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded ${
-                                  isOpExpense
+                                  isIncome
+                                    ? 'bg-teal-100 text-teal-800'
+                                    : isOpExpense
                                     ? 'bg-red-100 text-red-800'
                                     : 'bg-blue-100 text-blue-800'
                                 }`}
@@ -944,8 +1023,12 @@ export default function Reports() {
                               <p className="font-semibold text-gray-900">{row.description}</p>
                               {row.detail && <p className="text-xs text-gray-500">{row.detail}</p>}
                             </td>
-                            <td className="p-3 text-right font-bold text-red-600 whitespace-nowrap">
-                              - {currency} {row.amount.toFixed(2)}
+                            <td
+                              className={`p-3 text-right font-bold whitespace-nowrap ${
+                                isIncome ? 'text-teal-700' : 'text-red-600'
+                              }`}
+                            >
+                              {isIncome ? '+' : '-'} {currency} {row.amount.toFixed(2)}
                             </td>
                             <td
                               className={`p-3 text-right font-bold whitespace-nowrap bg-gray-50 ${
@@ -961,6 +1044,17 @@ export default function Reports() {
                   </tbody>
 
                   <tfoot>
+                    {capitalStatement.totalOtherIncomesFiltered > 0 && (
+                      <tr className="border-t border-teal-200 bg-teal-50/70 font-bold text-sm">
+                        <td colSpan={4} className="p-3 text-right uppercase text-teal-900">
+                          Total Ingresos Varios {dateFrom || dateTo ? '(Período Filtrado)' : 'Acumulados'}:
+                        </td>
+                        <td className="p-3 text-right text-teal-700 font-extrabold whitespace-nowrap">
+                          + {currency} {capitalStatement.totalOtherIncomesFiltered.toFixed(2)}
+                        </td>
+                        <td className="p-3 text-right bg-gray-200/70"></td>
+                      </tr>
+                    )}
                     <tr className="border-t-2 border-gray-800 bg-gray-100 font-bold text-sm">
                       <td colSpan={4} className="p-3 text-right uppercase text-gray-700">
                         Total Gastos y Compras {dateFrom || dateTo ? '(Período Filtrado)' : 'Acumulados'}:
