@@ -42,6 +42,15 @@ interface ExpenseRecord {
   created_at: string;
 }
 
+interface OtherIncomeRecord {
+  id: string;
+  category: 'Intereses Bancarios' | 'Rendimientos' | 'Otros Ingresos' | string;
+  description: string;
+  amount: number;
+  payment_method: string;
+  created_at: string;
+}
+
 interface CompanyConfig {
   companyName: string;
   nit: string;
@@ -58,6 +67,7 @@ interface CompanyConfig {
 type UserRole = 'administrador' | 'vendedor' | 'contabilidad' | 'técnico' | 'tecnico' | string;
 
 const LOCAL_EXPENSES_KEY = 'reutilizanet_cashbox_expenses';
+const LOCAL_OTHER_INCOMES_KEY = 'reutilizanet_cashbox_other_incomes';
 
 export default function Cashbox() {
   const navigate = useNavigate();
@@ -71,7 +81,7 @@ export default function Cashbox() {
   const [successBanner, setSuccessBanner] = useState('');
   const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
-  const [totalIncome, setTotalIncome] = useState<number>(0);
+  const [totalSalesIncome, setTotalSalesIncome] = useState<number>(0);
   const [sessionIncome, setSessionIncome] = useState<number>(0);
   const [userRole, setUserRole] = useState<UserRole>('administrador');
 
@@ -82,6 +92,16 @@ export default function Cashbox() {
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expensePaymentMethod, setExpensePaymentMethod] = useState('efectivo');
   const [expenseLoading, setExpenseLoading] = useState(false);
+
+  // Estados para Ingresos Varios (Intereses bancarios por capital guardado, rendimientos, otros)
+  const [otherIncomes, setOtherIncomes] = useState<OtherIncomeRecord[]>([]);
+  const [otherIncomeCategory, setOtherIncomeCategory] = useState<
+    'Intereses Bancarios' | 'Rendimientos' | 'Otros Ingresos'
+  >('Intereses Bancarios');
+  const [otherIncomeDescription, setOtherIncomeDescription] = useState('');
+  const [otherIncomeAmount, setOtherIncomeAmount] = useState('');
+  const [otherIncomePaymentMethod, setOtherIncomePaymentMethod] = useState('transferencia');
+  const [otherIncomeLoading, setOtherIncomeLoading] = useState(false);
 
   const [companyConfig, setCompanyConfig] = useState<CompanyConfig>({
     companyName: 'ReutilizaNet',
@@ -101,6 +121,7 @@ export default function Cashbox() {
     fetchProducts();
     fetchSalesIncome();
     fetchExpenses();
+    fetchOtherIncomes();
     fetchCompanyConfig();
   }, []);
 
@@ -180,7 +201,7 @@ export default function Cashbox() {
         const val = Number(row?.amount_paid ?? row?.total_amount ?? row?.total ?? 0);
         return acc + (isNaN(val) ? 0 : val);
       }, 0);
-      setTotalIncome(sum);
+      setTotalSalesIncome(sum);
     }
   };
 
@@ -267,7 +288,6 @@ export default function Cashbox() {
       };
 
       if (error) {
-        // Respaldo local si la tabla expenses aún no existe o tiene restricciones
         const updatedLocal = [newRecord, ...expenses];
         setExpenses(updatedLocal);
         saveLocalExpenses(updatedLocal);
@@ -295,6 +315,118 @@ export default function Cashbox() {
     const updated = expenses.filter(item => item.id !== id);
     setExpenses(updated);
     saveLocalExpenses(updated);
+  };
+
+  const loadLocalOtherIncomes = (): OtherIncomeRecord[] => {
+    try {
+      const raw = localStorage.getItem(LOCAL_OTHER_INCOMES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveLocalOtherIncomes = (list: OtherIncomeRecord[]) => {
+    try {
+      localStorage.setItem(LOCAL_OTHER_INCOMES_KEY, JSON.stringify(list));
+    } catch {
+      // Ignorar errores de cuota de almacenamiento
+    }
+  };
+
+  const fetchOtherIncomes = async () => {
+    const { data, error } = await supabase
+      .from('other_incomes')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!error && Array.isArray(data)) {
+      const mapped: OtherIncomeRecord[] = data.map((row: any) => ({
+        id: String(row.id),
+        category: row.category || row.type || 'Intereses Bancarios',
+        description: row.description || row.concept || row.detail || 'Ingreso vario',
+        amount: Number(row.amount ?? row.total ?? 0) || 0,
+        payment_method: row.payment_method || 'transferencia',
+        created_at: row.created_at || new Date().toISOString()
+      }));
+      setOtherIncomes(mapped);
+      saveLocalOtherIncomes(mapped);
+      return;
+    }
+
+    setOtherIncomes(loadLocalOtherIncomes());
+  };
+
+  const handleRegisterOtherIncome = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const numericAmount = Number(otherIncomeAmount);
+    if (!otherIncomeDescription.trim()) {
+      alert('Ingresa una descripción (ej. Intereses por capital en cuenta bancaria).');
+      return;
+    }
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      alert('Ingresa un monto válido mayor a 0.');
+      return;
+    }
+
+    setOtherIncomeLoading(true);
+    const nowIso = new Date().toISOString();
+    const cleanDescription = otherIncomeDescription.trim();
+
+    try {
+      const payload = {
+        category: otherIncomeCategory,
+        description: cleanDescription,
+        amount: Number(numericAmount.toFixed(2)),
+        payment_method: otherIncomePaymentMethod,
+        created_at: nowIso
+      };
+
+      const { data, error } = await supabase
+        .from('other_incomes')
+        .insert([payload])
+        .select()
+        .maybeSingle();
+
+      const newRecord: OtherIncomeRecord = {
+        id: data?.id ? String(data.id) : `inc-${Date.now()}`,
+        category: otherIncomeCategory,
+        description: cleanDescription,
+        amount: Number(numericAmount.toFixed(2)),
+        payment_method: otherIncomePaymentMethod,
+        created_at: data?.created_at || nowIso
+      };
+
+      if (error) {
+        const updatedLocal = [newRecord, ...otherIncomes];
+        setOtherIncomes(updatedLocal);
+        saveLocalOtherIncomes(updatedLocal);
+        setSuccessBanner(
+          `Ingreso vario registrado en sesión (${otherIncomeCategory}: + Bs. ${numericAmount.toFixed(2)}).`
+        );
+      } else {
+        await fetchOtherIncomes();
+        setSuccessBanner(
+          `Ingreso vario registrado correctamente (${otherIncomeCategory}: + Bs. ${numericAmount.toFixed(2)}).`
+        );
+      }
+
+      setOtherIncomeDescription('');
+      setOtherIncomeAmount('');
+    } finally {
+      setOtherIncomeLoading(false);
+    }
+  };
+
+  const handleDeleteOtherIncome = async (id: string) => {
+    if (!window.confirm('¿Eliminar este registro de ingreso vario?')) return;
+
+    await supabase.from('other_incomes').delete().eq('id', id);
+    const updated = otherIncomes.filter(item => item.id !== id);
+    setOtherIncomes(updated);
+    saveLocalOtherIncomes(updated);
   };
 
   const mapRowsToProducts = (
@@ -361,8 +493,13 @@ export default function Cashbox() {
   };
 
   const totalAmount = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const totalOtherIncomes = otherIncomes.reduce(
+    (sum, item) => sum + (Number(item.amount) || 0),
+    0
+  );
+  const totalAllIncomes = totalSalesIncome + totalOtherIncomes;
   const totalExpenses = expenses.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-  const netBalance = totalIncome - totalExpenses;
+  const netBalance = totalAllIncomes - totalExpenses;
 
   const numericAmountPaid =
     paymentMethod === 'efectivo'
@@ -570,7 +707,7 @@ export default function Cashbox() {
 
       const incomeAdded = snapshotPayment === 'efectivo' ? snapshotTotal : snapshotPaid;
       setSessionIncome(prev => Number((prev + incomeAdded).toFixed(2)));
-      setTotalIncome(prev => Number((prev + incomeAdded).toFixed(2)));
+      setTotalSalesIncome(prev => Number((prev + incomeAdded).toFixed(2)));
 
       setSuccessBanner('¡Venta procesada con éxito!');
       setReceipt(generatedReceipt);
@@ -612,7 +749,7 @@ export default function Cashbox() {
               Módulo de Caja y Ventas — {companyConfig.companyName}
             </h1>
             <p className="text-xs text-gray-500">
-              Cobros en Bs., control de stock, egresos y emisión de notas de venta
+              Cobros en Bs., control de stock, ingresos varios, egresos y notas de venta
             </p>
           </div>
         </div>
@@ -703,29 +840,37 @@ export default function Cashbox() {
       {/* SECCIÓN 1: VENTAS Y CATÁLOGO */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow border border-gray-100">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 bg-emerald-50 border border-emerald-200 p-3 rounded-lg">
             <div>
-              <p className="text-xs font-semibold uppercase text-emerald-800">
-                Ingresos Sesión
+              <p className="text-[11px] font-semibold uppercase text-emerald-800">
+                Ventas Sesión
               </p>
-              <p className="text-lg font-extrabold text-emerald-700">
+              <p className="text-base font-extrabold text-emerald-700">
                 + Bs. {sessionIncome.toFixed(2)}
               </p>
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-rose-700">
-                Total Egresos / Pagos
+              <p className="text-[11px] font-semibold uppercase text-teal-800">
+                Ingresos Varios
               </p>
-              <p className="text-lg font-extrabold text-rose-600">
+              <p className="text-base font-extrabold text-teal-700">
+                + Bs. {totalOtherIncomes.toFixed(2)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase text-rose-700">
+                Egresos / Pagos
+              </p>
+              <p className="text-base font-extrabold text-rose-600">
                 - Bs. {totalExpenses.toFixed(2)}
               </p>
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-gray-600">
+              <p className="text-[11px] font-semibold uppercase text-gray-600">
                 Saldo Neto Caja
               </p>
               <p
-                className={`text-lg font-extrabold ${
+                className={`text-base font-extrabold ${
                   netBalance >= 0 ? 'text-gray-900' : 'text-red-600'
                 }`}
               >
@@ -904,7 +1049,155 @@ export default function Cashbox() {
         </div>
       </div>
 
-      {/* SECCIÓN 2: EGRESOS Y PAGOS (SALARIOS, SERVICIOS Y OTROS) */}
+      {/* SECCIÓN 2: INGRESOS VARIOS (INTERESES BANCARIOS POR CAPITAL GUARDADO, RENDIMIENTOS Y OTROS) */}
+      <div className="bg-white p-6 rounded-xl shadow border border-gray-100">
+        <div className="flex flex-wrap justify-between items-center gap-2 mb-4 border-b pb-3">
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">
+              Ingresos Varios (Intereses Bancarios, Rendimientos y Otros)
+            </h2>
+            <p className="text-xs text-gray-500">
+              Registra entradas de dinero no provenientes de ventas, como intereses ganados por capital guardado en cuenta bancaria
+            </p>
+          </div>
+          <div className="bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-lg text-sm font-bold text-teal-800">
+            Total Ingresos Varios: + Bs. {totalOtherIncomes.toFixed(2)}
+          </div>
+        </div>
+
+        <form
+          onSubmit={handleRegisterOtherIncome}
+          className="grid grid-cols-1 md:grid-cols-12 gap-3 mb-6 items-end"
+        >
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Categoría
+            </label>
+            <select
+              value={otherIncomeCategory}
+              onChange={e =>
+                setOtherIncomeCategory(
+                  e.target.value as
+                    | 'Intereses Bancarios'
+                    | 'Rendimientos'
+                    | 'Otros Ingresos'
+                )
+              }
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="Intereses Bancarios">Intereses Bancarios</option>
+              <option value="Rendimientos">Rendimientos</option>
+              <option value="Otros Ingresos">Otros Ingresos</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Descripción / Concepto
+            </label>
+            <input
+              type="text"
+              value={otherIncomeDescription}
+              onChange={e => setOtherIncomeDescription(e.target.value)}
+              placeholder="Ej. Intereses banco por capital guardado, Rendimiento..."
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm"
+            />
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Monto (Bs.)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={otherIncomeAmount}
+              onChange={e => setOtherIncomeAmount(e.target.value)}
+              placeholder="0.00"
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm"
+            />
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Medio de Ingreso
+            </label>
+            <select
+              value={otherIncomePaymentMethod}
+              onChange={e => setOtherIncomePaymentMethod(e.target.value)}
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="transferencia">Transferencia</option>
+              <option value="efectivo">Efectivo</option>
+              <option value="qr">Pago QR</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-2">
+            <button
+              type="submit"
+              disabled={otherIncomeLoading}
+              className="w-full bg-teal-600 hover:bg-teal-700 text-white py-2.5 px-4 rounded-lg text-sm font-bold transition disabled:bg-gray-300"
+            >
+              {otherIncomeLoading ? 'Guardando...' : '+ Registrar Ingreso'}
+            </button>
+          </div>
+        </form>
+
+        {otherIncomes.length === 0 ? (
+          <p className="text-sm text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
+            No hay ingresos varios registrados todavía.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="bg-gray-50 border-b text-xs uppercase text-gray-600">
+                  <th className="p-2.5">Fecha</th>
+                  <th className="p-2.5">Categoría</th>
+                  <th className="p-2.5">Descripción</th>
+                  <th className="p-2.5">Medio</th>
+                  <th className="p-2.5 text-right">Monto</th>
+                  <th className="p-2.5 text-center">Acción</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {otherIncomes.map(inc => (
+                  <tr key={inc.id} className="hover:bg-gray-50">
+                    <td className="p-2.5 text-xs text-gray-500">
+                      {new Date(inc.created_at).toLocaleString()}
+                    </td>
+                    <td className="p-2.5">
+                      <span className="inline-block px-2 py-0.5 rounded text-xs font-semibold bg-teal-100 text-teal-800">
+                        {inc.category}
+                      </span>
+                    </td>
+                    <td className="p-2.5 font-medium text-gray-900">{inc.description}</td>
+                    <td className="p-2.5 text-xs text-gray-600">
+                      {formatPaymentMethodLabel(inc.payment_method)}
+                    </td>
+                    <td className="p-2.5 text-right font-bold text-teal-700">
+                      + Bs. {Number(inc.amount).toFixed(2)}
+                    </td>
+                    <td className="p-2.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteOtherIncome(inc.id)}
+                        className="text-xs text-red-600 hover:underline font-semibold"
+                      >
+                        Eliminar
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* SECCIÓN 3: EGRESOS Y PAGOS (SALARIOS, SERVICIOS Y OTROS) */}
       <div className="bg-white p-6 rounded-xl shadow border border-gray-100">
         <div className="flex flex-wrap justify-between items-center gap-2 mb-4 border-b pb-3">
           <div>
@@ -916,7 +1209,7 @@ export default function Cashbox() {
             </p>
           </div>
           <div className="bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg text-sm font-bold text-rose-700">
-            Total Egresos: Bs. {totalExpenses.toFixed(2)}
+            Total Egresos: - Bs. {totalExpenses.toFixed(2)}
           </div>
         </div>
 
