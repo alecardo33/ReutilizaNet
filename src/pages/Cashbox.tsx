@@ -195,6 +195,11 @@ export default function Cashbox() {
     }
   };
 
+  const getCartQuantity = (productId: string) => {
+    const found = cart.find(item => item.id === productId);
+    return found ? found.quantity : 0;
+  };
+
   const addToCart = (product: Product) => {
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
@@ -450,8 +455,8 @@ export default function Cashbox() {
     }
   };
 
-  const filteredProducts = products.filter(
-    p => p.stock > 0 && p.name.toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredProducts = products.filter(p =>
+    p.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   return (
@@ -602,31 +607,53 @@ export default function Cashbox() {
 
           {filteredProducts.length === 0 ? (
             <p className="text-sm text-gray-500 py-4">
-              No hay productos con stock disponible.
+              No se encontraron productos.
             </p>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-[500px] overflow-y-auto">
-              {filteredProducts.map(product => (
-                <div
-                  key={product.id}
-                  className="border border-gray-200 p-4 rounded-lg flex flex-col justify-between"
-                >
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{product.name}</h3>
-                    <p className="text-green-600 font-bold mt-1">
-                      Bs. {product.price.toFixed(2)}
-                    </p>
-                    <p className="text-xs text-gray-500 mt-0.5">Stock: {product.stock}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => addToCart(product)}
-                    className="mt-3 bg-indigo-600 text-white py-1.5 px-3 rounded-lg text-sm font-semibold hover:bg-indigo-700"
+              {filteredProducts.map(product => {
+                const inCartQty = getCartQuantity(product.id);
+                const availableStock = Math.max(0, product.stock - inCartQty);
+                const isOutOfStock = availableStock === 0;
+
+                return (
+                  <div
+                    key={product.id}
+                    className={`border p-4 rounded-lg flex flex-col justify-between transition ${
+                      isOutOfStock
+                        ? 'border-gray-200 bg-gray-50 opacity-75'
+                        : 'border-gray-200 bg-white'
+                    }`}
                   >
-                    + Agregar
-                  </button>
-                </div>
-              ))}
+                    <div>
+                      <h3 className="font-semibold text-gray-900">{product.name}</h3>
+                      <p className="text-green-600 font-bold mt-1">
+                        Bs. {product.price.toFixed(2)}
+                      </p>
+                      <p
+                        className={`text-xs mt-0.5 font-medium ${
+                          isOutOfStock ? 'text-red-600 font-bold' : 'text-gray-500'
+                        }`}
+                      >
+                        Stock: {availableStock}
+                        {inCartQty > 0 ? ` (En carrito: ${inCartQty})` : ''}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isOutOfStock}
+                      onClick={() => addToCart(product)}
+                      className={`mt-3 py-1.5 px-3 rounded-lg text-sm font-semibold transition ${
+                        isOutOfStock
+                          ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      }`}
+                    >
+                      {isOutOfStock ? 'Sin stock' : '+ Agregar'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
