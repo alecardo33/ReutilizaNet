@@ -8,6 +8,7 @@ interface Product {
   cost: number;
   stock: number;
   sourceTable: 'inventory' | 'products';
+  stockField: 'stock' | 'quantity';
 }
 
 interface CartItem extends Product {
@@ -121,34 +122,35 @@ export default function CashBox() {
     }
   };
 
+  const mapRowsToProducts = (
+    rows: any[],
+    sourceTable: 'inventory' | 'products'
+  ): Product[] =>
+    rows.map((item: any) => {
+      const hasStockCol = Object.prototype.hasOwnProperty.call(item, 'stock');
+      const stockField: 'stock' | 'quantity' = hasStockCol ? 'stock' : 'quantity';
+      const rawStock = hasStockCol ? item.stock : item.quantity;
+      return {
+        id: String(item.id),
+        name: item.name || item.item_name || 'Producto',
+        price: Number(item.price ?? item.sale_price ?? 0) || 0,
+        cost: Number(item.cost ?? item.unit_cost ?? 0) || 0,
+        stock: Number(rawStock ?? 0) || 0,
+        sourceTable,
+        stockField
+      };
+    });
+
   const fetchProducts = async () => {
     const invRes = await supabase.from('inventory').select('*');
     if (!invRes.error && Array.isArray(invRes.data)) {
-      setProducts(
-        invRes.data.map((item: any) => ({
-          id: String(item.id),
-          name: item.name || item.item_name || 'Producto',
-          price: Number(item.price ?? item.sale_price ?? 0) || 0,
-          cost: Number(item.cost ?? item.unit_cost ?? 0) || 0,
-          stock: Number(item.stock ?? item.quantity ?? 0) || 0,
-          sourceTable: 'inventory'
-        }))
-      );
+      setProducts(mapRowsToProducts(invRes.data, 'inventory'));
       return;
     }
 
     const prodRes = await supabase.from('products').select('*');
     if (!prodRes.error && Array.isArray(prodRes.data)) {
-      setProducts(
-        prodRes.data.map((item: any) => ({
-          id: String(item.id),
-          name: item.name || 'Producto',
-          price: Number(item.price ?? 0) || 0,
-          cost: Number(item.cost ?? item.unit_cost ?? 0) || 0,
-          stock: Number(item.stock ?? 0) || 0,
-          sourceTable: 'products'
-        }))
-      );
+      setProducts(mapRowsToProducts(prodRes.data, 'products'));
     }
   };
 
@@ -194,6 +196,52 @@ export default function CashBox() {
     return m === 'qr' || m === 'transferencia';
   };
 
+  const decrementItemStockInDb = async (
+    item: CartItem,
+    fallbackProduct?: Product
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const currentStock = Number(fallbackProduct?.stock ?? item.stock ?? 0);
+    const qtyToSubtract = Number(item.quantity || 0);
+    const nextStock = Math.max(0, currentStock - qtyToSubtract);
+    const targetTable = item.sourceTable || fallbackProduct?.sourceTable || 'inventory';
+    const targetField = item.stockField || fallbackProduct?.stockField || 'stock';
+
+    // Intento 1: actualizar columna detectada ('stock' o 'quantity') con .select() para verificar filas afectadas
+    const { data: updatedRows, error: updErr } = await supabase
+      .from(targetTable)
+      .update({ [targetField]: nextStock })
+      .eq('id', item.id)
+      .select();
+
+    if (!updErr && Array.isArray(updatedRows) && updatedRows.length > 0) {
+      return { ok: true };
+    }
+
+    // Intento 2: si la columna alternativa existe en la tabla, probar con ella
+    const altField = targetField === 'stock' ? 'quantity' : 'stock';
+    const { data: altRows, error: altErr } = await supabase
+      .from(targetTable)
+      .update({ [altField]: nextStock })
+      .eq('id', item.id)
+      .select();
+
+    if (!altErr && Array.isArray(altRows) && altRows.length > 0) {
+      return { ok: true };
+    }
+
+    if (updErr || altErr) {
+      return {
+        ok: false,
+        reason: (updErr || altErr)?.message || 'Error al actualizar stock'
+      };
+    }
+
+    return {
+      ok: false,
+      reason: `0 filas actualizadas en "${targetTable}" (id=${item.id}). Revisa política RLS UPDATE en Supabase.`
+    };
+  };
+
   const handleProcessSale = async () => {
     if (cart.length === 0) {
       alert('El carrito está vacío.');
@@ -209,13 +257,10 @@ export default function CashBox() {
     setSuccessBanner('');
     try {
       const snapshotItems = cart.map(item => ({
-        id: item.id,
-        name: item.name,
-        quantity: item.quantity,
+        ...item,
         price: Number(item.price) || 0,
         cost: Number(item.cost) || 0,
-        subtotal: (Number(item.price) || 0) * item.quantity,
-        sourceTable: item.sourceTable
+        subtotal: (Number(item.price) || 0) * item.quantity
       }));
       const snapshotClient = clientName.trim() || 'Cliente General';
       const snapshotPayment = paymentMethod;
@@ -293,21 +338,33 @@ export default function CashBox() {
         }
       }
 
-      // Descontar stock de cada ítem vendido en inventory o products
+      // Descontar stock de cada ítem vendido y verificar resultado real
+      const stockErrors: string[] = [];
+      const nextStockById: Record<string, number> = {};
+
       for (const item of snapshotItems) {
         const currentProduct = products.find(p => p.id === item.id);
-        const currentStock = Number(currentProduct?.stock ?? 0);
-        const nextStock = Math.max(0, currentStock - Number(item.quantity || 0));
-        const targetTable = item.sourceTable || currentProduct?.sourceTable || 'inventory';
+        const currentStock = Number(currentProduct?.stock ?? item.stock ?? 0);
+        const expectedNextStock = Math.max(0, currentStock - Number(item.quantity || 0));
+        nextStockById[item.id] = expectedNextStock;
 
-        const { error: stockErr } = await supabase
-          .from(targetTable)
-          .update({ stock: nextStock })
-          .eq('id', item.id);
-
-        if (stockErr && !dbWarning) {
-          dbWarning = `Venta registrada, pero no se pudo actualizar stock de "${item.name}": ${stockErr.message}`;
+        const decRes = await decrementItemStockInDb(item, currentProduct);
+        if (!decRes.ok) {
+          stockErrors.push(`${item.name}: ${decRes.reason || 'no se pudo descontar'}`);
         }
+      }
+
+      // Actualizar estado local del catálogo de inmediato
+      setProducts(prev =>
+        prev.map(p =>
+          Object.prototype.hasOwnProperty.call(nextStockById, p.id)
+            ? { ...p, stock: nextStockById[p.id] }
+            : p
+        )
+      );
+
+      if (stockErrors.length > 0 && !dbWarning) {
+        dbWarning = `Venta registrada, pero revisa el descuento de stock (${stockErrors.join(' | ')})`;
       }
 
       const generatedReceipt: SaleReceipt = {
@@ -341,7 +398,7 @@ export default function CashBox() {
       await Promise.all([fetchProducts(), fetchSalesIncome()]);
 
       if (dbWarning) {
-        alert(`Nota de Venta abierta, pero hubo un aviso: ${dbWarning}`);
+        alert(`Aviso: ${dbWarning}`);
       }
     } catch (err: any) {
       console.error('Error al procesar la venta:', err);
