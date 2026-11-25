@@ -46,6 +46,8 @@ interface CompanyConfig {
   warrantyNotes: string;
 }
 
+type UserRole = 'administrador' | 'vendedor' | 'contabilidad' | 'técnico' | 'tecnico' | string;
+
 export default function CashBox() {
   const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>([]);
@@ -60,6 +62,7 @@ export default function CashBox() {
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
   const [totalIncome, setTotalIncome] = useState<number>(0);
   const [sessionIncome, setSessionIncome] = useState<number>(0);
+  const [userRole, setUserRole] = useState<UserRole>('administrador');
   const [companyConfig, setCompanyConfig] = useState<CompanyConfig>({
     companyName: 'ReutilizaNet',
     nit: '',
@@ -74,10 +77,46 @@ export default function CashBox() {
   });
 
   useEffect(() => {
+    fetchUserRole();
     fetchProducts();
     fetchSalesIncome();
     fetchCompanyConfig();
   }, []);
+
+  const fetchUserRole = async () => {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const user = authData?.user;
+      if (!user) return;
+
+      const metaRole =
+        user.user_metadata?.role ||
+        user.app_metadata?.role ||
+        '';
+
+      if (metaRole) {
+        setUserRole(String(metaRole).toLowerCase());
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (profile?.role) {
+        setUserRole(String(profile.role).toLowerCase());
+      }
+    } catch {
+      // Si no existe tabla profiles o metadata, mantiene acceso por defecto
+    }
+  };
+
+  const normalizedRole = userRole.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const isAdmin = normalizedRole === 'administrador';
+  const canViewReports = isAdmin || normalizedRole === 'contabilidad';
+  const canViewInventory = normalizedRole !== 'contabilidad';
 
   const fetchCompanyConfig = async () => {
     const { data, error } = await supabase
@@ -428,51 +467,82 @@ export default function CashBox() {
           )}
           <div>
             <h1 className="text-xl font-bold text-gray-900">
-              Caja y Ventas — {companyConfig.companyName}
+              Módulo de Caja y Ventas — {companyConfig.companyName}
             </h1>
             <p className="text-xs text-gray-500">
-              Registro de ventas, control de stock y emisión de notas de venta
+              Cobros en Bs., control de stock y emisión de notas de venta
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <nav className="flex flex-wrap items-center gap-2">
+          {canViewInventory && (
+            <button
+              type="button"
+              onClick={() => navigate('/inventory')}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+            >
+              + Nota de Ingreso
+            </button>
+          )}
           <button
             type="button"
             onClick={() => navigate('/')}
-            className="bg-gray-600 hover:bg-gray-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+            className="bg-slate-600 hover:bg-slate-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
           >
             Inicio
           </button>
+          {canViewInventory && (
+            <button
+              type="button"
+              onClick={() => navigate('/inventory')}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+            >
+              Inventario y Taller
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => navigate('/inventory')}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+            onClick={() => navigate('/cashbox')}
+            className="bg-purple-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
           >
-            Inventario
+            Caja
           </button>
-          <button
-            type="button"
-            onClick={() => navigate('/reports')}
-            className="bg-purple-600 hover:bg-purple-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
-          >
-            Reportes
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate('/settings')}
-            className="bg-gray-800 hover:bg-gray-900 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
-          >
-            Configuración
-          </button>
+          {canViewReports && (
+            <button
+              type="button"
+              onClick={() => navigate('/reports')}
+              className="bg-purple-600 hover:bg-purple-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+            >
+              Reportes
+            </button>
+          )}
+          {isAdmin && (
+            <>
+              <button
+                type="button"
+                onClick={() => navigate('/users')}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+              >
+                Usuarios
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/settings')}
+                className="bg-slate-800 hover:bg-slate-900 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+              >
+                Configuración
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={handleLogout}
-            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
           >
             Cerrar Sesión
           </button>
-        </div>
+        </nav>
       </div>
 
       {successBanner && (
