@@ -442,7 +442,64 @@ export default function Reports() {
 
   const capitalStatement = buildCapitalStatement()
 
-  const filteredSales = sales.filter(sale => {
+  const consolidateSalesIntoSingleTransactions = (rawSales: SaleRecord[]): SaleRecord[] => {
+    if (!Array.isArray(rawSales) || rawSales.length === 0) return []
+    const groupsMap = new Map<string, SaleRecord>()
+
+    rawSales.forEach((s: any, idx: number) => {
+      const explicitGroup = s.sale_group_id || s.group_id || s.receipt_id || ''
+      const createdKey = s.created_at
+        ? String(Math.floor(new Date(s.created_at).getTime() / 2000))
+        : String(idx)
+      const fallbackKey = `${createdKey}__${String(s.customer || s.client_name || '').trim().toLowerCase()}__${String(s.payment_method || '').trim().toLowerCase()}`
+      const key = explicitGroup ? `grp_${explicitGroup}` : fallbackKey
+
+      const itemName = resolveSaleProductName(s)
+      const itemQty = Number(s.quantity || 1) || 1
+      const itemTotal = Number(s.total_amount ?? s.total ?? 0) || 0
+      const itemPaid = getSalePaidAmount(s)
+      const itemCost = Number(s.unit_cost || 0) || 0
+
+      const existing = groupsMap.get(key)
+      if (!existing) {
+        groupsMap.set(key, {
+          ...s,
+          product_name: itemName,
+          quantity: itemQty,
+          unit_cost: itemCost,
+          total_amount: itemTotal,
+          amount_paid: itemPaid
+        })
+      } else {
+        const mergedNames = `${existing.product_name || ''}, ${itemName}`.trim()
+        const mergedQty = Number(existing.quantity || 0) + itemQty
+        const mergedTotal = Number((Number(existing.total_amount || 0) + itemTotal).toFixed(2))
+        const mergedPaid = Number((Number(existing.amount_paid || 0) + itemPaid).toFixed(2))
+        const totalUnits = Math.max(1, mergedQty)
+        const weightedCost = Number(
+          (
+            ((Number(existing.unit_cost || 0) * Math.max(1, Number(existing.quantity || 1))) +
+              (itemCost * itemQty)) /
+            totalUnits
+          ).toFixed(2)
+        )
+        groupsMap.set(key, {
+          ...existing,
+          product_name: mergedNames,
+          quantity: mergedQty,
+          unit_cost: weightedCost,
+          total_amount: mergedTotal,
+          amount_paid: mergedPaid
+        })
+      }
+    })
+
+    return Array.from(groupsMap.values())
+  }
+
+  const consolidatedSales = consolidateSalesIntoSingleTransactions(sales)
+
+  const filteredSales = consolidatedSales.filter(sale => {
     if (!sale) return false
     const pending = getSalePendingBalance(sale)
     const isPending = pending > 0.009

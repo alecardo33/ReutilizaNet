@@ -183,6 +183,7 @@ export default function Cashbox() {
       const snapshotPaid = numericAmountPaid;
       const snapshotChange = changeAmount;
       const nowIso = new Date().toISOString();
+      const saleGroupId = `sale-${Date.now()}`;
 
       const productSummary = snapshotItems
         .map(i => `${i.quantity}x ${i.name}`)
@@ -201,6 +202,7 @@ export default function Cashbox() {
             payment_method: snapshotPayment,
             client_name: snapshotClient,
             customer: snapshotClient,
+            sale_group_id: saleGroupId,
             created_at: nowIso
           }
         ])
