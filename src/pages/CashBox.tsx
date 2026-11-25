@@ -48,7 +48,7 @@ interface CompanyConfig {
 
 type UserRole = 'administrador' | 'vendedor' | 'contabilidad' | 'técnico' | 'tecnico' | string;
 
-export default function CashBox() {
+export default function Cashbox() {
   const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -114,7 +114,7 @@ export default function CashBox() {
   };
 
   const normalizedRole = userRole.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const isAdmin = normalizedRole === 'administrador';
+  const isAdmin = normalizedRole === 'administrador' || normalizedRole === 'admin';
   const canViewReports = isAdmin || normalizedRole === 'contabilidad';
   const canViewInventory = normalizedRole !== 'contabilidad';
 
@@ -521,7 +521,7 @@ export default function CashBox() {
             <>
               <button
                 type="button"
-                onClick={() => navigate('/users')}
+                onClick={() => navigate('/admin/users')}
                 className="bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
               >
                 Usuarios

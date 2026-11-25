@@ -1,7 +1,7 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import Inventory from './pages/Inventory'
-import Cashbox from './pages/Cashbox'
+import CashBox from './pages/Cashbox'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import AdminUsers from './pages/AdminUsers'
